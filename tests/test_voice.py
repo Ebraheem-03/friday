@@ -362,10 +362,11 @@ class TestTTSKokoro:
     @pytest.mark.asyncio
     async def test_synth_yields_pcm_bytes(self) -> None:
         """synth() yields bytes objects (raw int16 PCM) when mocked."""
-        import torch
-
-        # Build a fake KPipeline result with audio tensor.
-        fake_audio = torch.zeros(24_000, dtype=torch.float32)  # 1 s of silence
+        # Production synth() consumes audio via result.output.audio.numpy().
+        # Back that with a numpy array so this test needs neither torch nor the
+        # voice extra installed (CI runs .[dev] only).
+        fake_audio = MagicMock()
+        fake_audio.numpy.return_value = np.zeros(24_000, dtype=np.float32)  # 1 s silence
 
         fake_output = MagicMock()
         fake_output.audio = fake_audio
