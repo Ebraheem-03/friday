@@ -45,6 +45,7 @@ from collections.abc import Awaitable, Callable
 from core.brain import Brain, ConversationHistory
 from core.config import Settings
 from core.state import State, StateMachine
+from memory.recall import Memory
 
 logger = logging.getLogger(__name__)
 
@@ -100,13 +101,26 @@ class Orchestrator:
         settings: Settings | None = None,
         *,
         brain: Brain | None = None,
+        memory: Memory | None = None,
         input_maxsize: int = _QUEUE_MAXSIZE,
         output_maxsize: int = _QUEUE_MAXSIZE,
     ) -> None:
         if brain is None:
             if settings is None:
                 raise ValueError("Either 'settings' or 'brain' must be provided.")
-            brain = Brain(settings)
+            # Persistent memory: use the injected instance, else open the default
+            # SQLite store (~/.local/share/friday/memory.db). Only constructed on
+            # the real-boot path — callers injecting a Brain manage their own.
+            if memory is None:
+                memory = Memory()
+                self._owns_memory = True
+            else:
+                self._owns_memory = False
+            self._memory: Memory | None = memory
+            brain = Brain(settings, memory=memory)
+        else:
+            self._memory = memory
+            self._owns_memory = False
         self._brain = brain
         self._sm = StateMachine()
         self._input_q: asyncio.Queue[str] = asyncio.Queue(maxsize=input_maxsize)
@@ -166,6 +180,12 @@ class Orchestrator:
 
         self._brain_task = None
         self._consumer_task = None
+
+        # Close the memory store only if we opened it ourselves.
+        if self._owns_memory and self._memory is not None:
+            self._memory.close()
+            self._memory = None
+
         logger.info("Orchestrator stopped.")
 
     # ------------------------------------------------------------------
