@@ -3,7 +3,8 @@
 _Single source of cross-agent truth. Atlas keeps this current._
 
 ## Now
-- Steps 1–4 complete & committed. Live TTS smoke PASSED (3.02s @ 24kHz). Voice latency: model load ~14s (startup via preload()); steady-state first-audio ~1.0–1.3s on CPU. **137 passed, 2 skipped; ruff clean; sentinel GO.** Ready for Step 5 (mnemo).
+- Steps 1–4 complete, committed & pushed. **CI GREEN at 5918aed.** Live TTS smoke PASSED (3.02s @ 24kHz). Voice latency: model load ~14s (startup via preload()); steady-state first-audio ~1.0–1.3s on CPU. 137 passed, 2 skipped; ruff clean; sentinel GO. Ready for Step 5 (mnemo).
+- CI note (non-blocking): GitHub deprecation warning — actions/checkout@v4.2.2 + setup-python@v5.6.0 run on Node20; bump in a housekeeping pass.
 
 
 ## Environment (confirmed 2026-06-22)
