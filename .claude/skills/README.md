@@ -13,9 +13,10 @@ ls ~/.claude/skills/
 ```bash
 # adjust folder names to match `ls ~/.claude/skills/`
 cp -r ~/.claude/skills/frontend-design .claude/skills/frontend-design
- cp -r ~/.claude/skills/stitch          .claude/skills/stitch
- cp -r ~/.claude/skills/21st-dev         .claude/skills/21st-dev
+ cp -r ~/.claude/plugins/cache/google-labs-code-stitch-skills          .claude/skills/stitch
+ # 21st Dev is the magic mcp configured in home directory claude. cp -r ~/.claude/skills/21st-dev         .claude/skills/21st-dev
  cp -r ~/.claude/skills/impeccable       .claude/skills/impeccable
+ cp -r ~/.claude/skills/code-base       .claude/skills/code-base
 git add .claude/skills && git commit -m "chore: vendor project skills"
 ```
 

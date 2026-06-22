@@ -1,0 +1,48 @@
+# FRIDAY CI — lint + test
+# Triggers on push and PR to dev and main branches.
+# PyGObject requires system GObject introspection libraries; installed via apt below.
+
+name: CI
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
+
+jobs:
+  lint-and-test:
+    name: Lint & Test (Python 3.11)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.11"
+
+      # PyGObject needs these system libs before pip can build/install it.
+      - name: Install system dependencies for PyGObject
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libgirepository1.0-dev \
+            gobject-introspection \
+            libcairo2-dev \
+            pkg-config \
+            python3-dev \
+            gir1.2-glib-2.0
+
+      - name: Install Python dependencies (dev extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[dev]"
+
+      - name: Lint with ruff
+        run: ruff check .
+
+      - name: Run tests
+        run: pytest
