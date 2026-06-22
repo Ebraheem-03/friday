@@ -12,5 +12,6 @@
 
 --extra-index-url https://download.pytorch.org/whl/cpu
 
-# torch==<x.y.z>+cpu        # TODO(echo, Step 4): pin the resolved CPU build
-# transformers==<x.y.z>     # TODO(echo, Step 4): pin to match kokoro 0.9.4
+torch==2.12.1+cpu           # pinned by echo (Step 4); from PyTorch CPU index
+transformers==5.12.1        # pinned by echo (Step 4); resolved by kokoro==0.9.4
+spacy==3.8.14               # pinned by echo (Step 4); English G2P for misaki/kokoro — CPU-only pipeline

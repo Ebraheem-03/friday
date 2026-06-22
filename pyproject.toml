@@ -34,6 +34,14 @@ dependencies = [
 voice = [
   "sounddevice==0.5.5",       # Audio capture/playback
   "kokoro==0.9.4",            # Kokoro-82M local TTS (pulls torch — CPU only)
+  # spaCy + English G2P model — misaki/en.py calls spacy.load('en_core_web_sm')
+  # and will runtime-pip-install the model if absent (ADR-0008 violation).
+  # Pinning here so `pip install '.[voice]'` fetches both up-front.
+  # spacy 3.8.14 is the version installed alongside misaki 0.9.4 / kokoro 0.9.4;
+  # en_core_web_sm 3.8.0 is the exact model that spacy 3.8.x downloads by default.
+  # The whl URL matches the direct_url.json recorded by pip on the dev host.
+  "spacy==3.8.14",
+  "en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl#sha256=1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85",
 ]
 # --- scout / Step 7: web automation ---
 web = [

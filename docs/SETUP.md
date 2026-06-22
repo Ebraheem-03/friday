@@ -51,6 +51,14 @@ pip install '.[os]'                                   # vector, Step 6 — PyGOb
 **PROJECT RULE:** never install CUDA builds — torch/transformers must be CPU-only.
 The `voice` extra is always installed with `-c constraints/cpu.txt` (PyTorch CPU index).
 
+**G2P model note (en_core_web_sm):** `pip install '.[voice]'` also installs
+`spacy==3.8.14` and the `en_core_web_sm` English model wheel. This is required
+because `misaki` (Kokoro's English G2P) calls `spacy.load('en_core_web_sm')` and
+would otherwise trigger a runtime `pip install` on first synthesis — an ADR-0008
+violation. Both are pinned in `pyproject.toml` `[voice]` extra and in
+`constraints/cpu.txt`. No separate `python -m spacy download` step is needed; the
+wheel is fetched from the pinned GitHub release URL as part of the normal install.
+
 ## 5. Optional MCPs
 Only enable these inside the phase that needs them — see `docs/mcp/OPTIONAL-SERVERS.md`.
 
