@@ -34,8 +34,16 @@ def _reset_server_cache() -> None:
 
 
 @pytest.fixture(autouse=True)
-def _clear_server_cache():
-    """Auto-reset the display-server cache before every test."""
+def _clear_server_cache(monkeypatch: pytest.MonkeyPatch):
+    """Auto-reset the display-server cache before every test.
+
+    Also strips the host's real display-server env vars so detection is
+    deterministic regardless of the developer's session (e.g. a Wayland host
+    would otherwise mask a missing per-test cache reset that headless CI hits).
+    Tests that need a specific server set it explicitly + reset the cache.
+    """
+    for var in ("XDG_SESSION_TYPE", "WAYLAND_DISPLAY", "DISPLAY"):
+        monkeypatch.delenv(var, raising=False)
     _reset_server_cache()
     yield
     _reset_server_cache()
@@ -599,6 +607,7 @@ class TestTypeAction:
         self, dry_run_bridge, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        _reset_server_cache()  # bridge init cached host/unknown; force re-detect
 
         fake_result = MagicMock()
         fake_result.returncode = 0
@@ -648,6 +657,7 @@ class TestClickAction:
         self, dry_run_bridge, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+        _reset_server_cache()  # bridge init cached host/unknown; force re-detect
 
         fake_result = MagicMock()
         fake_result.returncode = 0
