@@ -1,0 +1,16 @@
+# CPU-only install constraints — PROJECT RULE (Ebraheem): never install CUDA builds.
+#
+# kokoro (the `voice` extra) pulls in torch, which on Linux defaults to a large
+# CUDA wheel from PyPI. We force the CPU-only wheels from the official PyTorch
+# CPU index instead. pip honours --extra-index-url lines inside this file.
+#
+# Usage (echo / Step 4 and any local voice work):
+#   pip install '.[voice]' -c constraints/cpu.txt
+#
+# echo (Step 4) must pin the exact torch (+cpu) / transformers versions kokoro
+# 0.9.4 resolves to and add them below with `==` so the CPU build is locked.
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# torch==<x.y.z>+cpu        # TODO(echo, Step 4): pin the resolved CPU build
+# transformers==<x.y.z>     # TODO(echo, Step 4): pin to match kokoro 0.9.4

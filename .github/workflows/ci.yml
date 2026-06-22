@@ -24,19 +24,11 @@ jobs:
         with:
           python-version: "3.11"
 
-      # PyGObject needs these system libs before pip can build/install it.
-      - name: Install system dependencies for PyGObject
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            libgirepository1.0-dev \
-            gobject-introspection \
-            libcairo2-dev \
-            pkg-config \
-            python3-dev \
-            gir1.2-glib-2.0
-
-      - name: Install Python dependencies (dev extras)
+      # CI installs only the dev extra: google-genai (pure-Python) + test/lint
+      # tools. The voice/web/os extras (torch, Playwright, native PyGObject) are
+      # intentionally NOT installed here — they are heavy, native, and unneeded
+      # for the mocked unit tests. No CUDA is ever pulled in CI.
+      - name: Install Python dependencies (dev extra)
         run: |
           python -m pip install --upgrade pip
           pip install ".[dev]"

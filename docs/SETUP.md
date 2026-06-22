@@ -37,6 +37,20 @@ cp friday/.env.example friday/.env
 ```
 **[YOU]** Fill: `GEMINI_API_KEY` (required). Optional: `TWENTY_FIRST_API_KEY` (21st.dev), and a GCP project for Stitch.
 
+## 4b. Python runtime stack — install per module (extras)
+Only `google-genai` (the brain) is an always-on dependency. The heavy native/ML
+stacks are split into extras so CI and core work stay light. Install only what a
+phase needs:
+```bash
+pip install '.[dev]'                                  # tests + lint (no native/CUDA)
+pip install '.[voice]' -c constraints/cpu.txt         # echo, Step 4 — CPU-only torch
+pip install '.[web]'                                  # scout, Step 7 — browser-use + Scrapling
+sudo apt install -y libgirepository-2.0-dev gobject-introspection
+pip install '.[os]'                                   # vector, Step 6 — PyGObject (AT-SPI)
+```
+**PROJECT RULE:** never install CUDA builds — torch/transformers must be CPU-only.
+The `voice` extra is always installed with `-c constraints/cpu.txt` (PyTorch CPU index).
+
 ## 5. Optional MCPs
 Only enable these inside the phase that needs them — see `docs/mcp/OPTIONAL-SERVERS.md`.
 
