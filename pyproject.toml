@@ -1,0 +1,23 @@
+[project]
+name = "friday"
+version = "0.0.1"
+description = "Local voice assistant (Gemini brain, Linux)."
+requires-python = ">=3.11"
+# Pin exact versions during Step 1 (sentinel verifies provenance).
+dependencies = [
+  # "google-genai==x.y.z",
+  # "sounddevice==x.y.z",
+  # "kokoro==x.y.z",
+  # "browser-use==x.y.z",
+  # "scrapling==x.y.z",
+  # "PyGObject==x.y.z",   # AT-SPI
+]
+
+[project.optional-dependencies]
+dev = [
+  # "pytest==x.y.z",
+  # "ruff==x.y.z",
+]
+
+[tool.ruff]
+line-length = 100

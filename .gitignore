@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+node_modules/
+dist/
+build/
+.DS_Store
+*.log
+~/.cache/codebase-memory-mcp/
