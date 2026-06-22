@@ -44,6 +44,13 @@ voice = [
   "spacy==3.8.14",
   "en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl#sha256=1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85",
 ]
+# --- halo / Step 8: HUD telemetry WebSocket ---
+#   websockets -> https://pypi.org/pypi/websockets/json
+#   psutil     -> https://pypi.org/pypi/psutil/json
+hud = [
+  "websockets==16.0",          # Async WebSocket server (HUD telemetry broadcast)
+  "psutil==7.2.2",             # CPU/RAM system metrics for telemetry frames
+]
 # --- scout / Step 7: web automation ---
 web = [
   "browser-use==0.13.1",      # Browser automation (runtime web agent)
