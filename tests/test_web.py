@@ -774,3 +774,50 @@ class TestScrapeSummary:
 
         assert isinstance(result, str)
         assert "error" in result.lower()
+
+
+# ---------------------------------------------------------------------------
+# Tests: max_steps passed to agent.run(), NOT Agent.__init__()
+# (Regression guard — sentinel MUST-FIX 2026-06-23)
+# ---------------------------------------------------------------------------
+
+
+class TestMaxStepsKwarg:
+    @pytest.mark.asyncio
+    async def test_max_steps_passed_to_run_not_constructor(self) -> None:
+        """max_steps must be passed to agent.run(), not Agent.__init__().
+
+        browser-use 0.13.1: Agent.__init__ has no max_steps param — it is
+        silently accepted via **kwargs but never applied. The cap only takes
+        effect when passed to Agent.run(max_steps=N).  This test asserts the
+        correct call site so a future refactor cannot regress.
+        """
+        from web.agent import WebAgent
+
+        mock_bu = MagicMock()
+        history = _make_history(final="done")
+
+        constructor_kwargs: list[dict] = []
+        run_kwargs: list[dict] = []
+
+        def _capture_agent(*args: Any, **kwargs: Any) -> MagicMock:
+            constructor_kwargs.append(kwargs)
+            mock_agent = MagicMock()
+            mock_agent.run = AsyncMock(side_effect=lambda **kw: (run_kwargs.append(kw), history)[1])
+            return mock_agent
+
+        mock_bu.Agent.side_effect = _capture_agent
+        mock_bu.ChatGoogle.return_value = MagicMock()
+
+        with patch.dict("sys.modules", {"browser_use": mock_bu}):
+            agent = WebAgent(_fake_settings(), allow_destructive=True, max_steps=7)
+            await agent.web_task("do something")
+
+        # max_steps must NOT appear in the constructor call
+        assert "max_steps" not in constructor_kwargs[0], (
+            "max_steps was incorrectly passed to Agent.__init__; it must go to agent.run()"
+        )
+        # max_steps MUST appear in run() with the correct value
+        assert run_kwargs[0].get("max_steps") == 7, (
+            f"agent.run() was not called with max_steps=7; got run kwargs: {run_kwargs}"
+        )

@@ -300,13 +300,17 @@ class WebAgent:
             return f"(web error) Failed to initialise LLM: {type(exc).__name__}: {exc}"
 
         # --- Agent construction + run ---------------------------------------
+        # NOTE: max_steps is a parameter of Agent.run(), NOT Agent.__init__().
+        # Passing it to the constructor would be silently swallowed by **kwargs
+        # and the cap would never be applied — a live-only bug CI cannot catch.
+        # Verified against browser-use 0.13.1 source: Agent.__init__ signature
+        # has no max_steps param; Agent.run(max_steps: int = 500) does.
         try:
             agent = Agent(
                 task=effective_task,
                 llm=llm,
-                max_steps=self._max_steps,
             )
-            history = await agent.run()
+            history = await agent.run(max_steps=self._max_steps)
         except Exception as exc:  # noqa: BLE001
             logger.debug(
                 "WebAgent: agent.run() raised %s", type(exc).__name__
