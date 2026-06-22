@@ -32,6 +32,7 @@ dependencies = [
 #   pip install '.[voice]' --extra-index-url https://download.pytorch.org/whl/cpu
 # See docs/SETUP.md and constraints/cpu.txt. (Project constraint — Ebraheem.)
 voice = [
+  "numpy==2.4.4",             # VAD / PCM math (direct import in voice/*)
   "sounddevice==0.5.5",       # Audio capture/playback
   "kokoro==0.9.4",            # Kokoro-82M local TTS (pulls torch — CPU only)
   # spaCy + English G2P model — misaki/en.py calls spacy.load('en_core_web_sm')
@@ -58,6 +59,7 @@ os = [
 #   pytest-asyncio -> https://pypi.org/pypi/pytest-asyncio/json
 #   ruff           -> https://pypi.org/pypi/ruff/json
 dev = [
+  "numpy==2.4.4",             # voice/* import numpy; needed to run mocked voice tests in CI
   "pytest==9.1.1",
   "pytest-asyncio==1.3.0",
   "ruff==0.15.18",
