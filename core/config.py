@@ -124,6 +124,9 @@ class Settings:
     ------
     gemini_api_key : str
         Required. Gemini API key — never logged or printed.
+    gemini_model : str
+        Gemini model ID to use for inference. Default: "gemini-2.5-flash".
+        Override with GEMINI_MODEL env var (e.g. "gemini-2.0-flash").
     sample_rate : int
         Audio sample rate in Hz. Default: 24000 (matches Kokoro TTS output).
     tts_voice : str
@@ -135,6 +138,7 @@ class Settings:
     """
 
     gemini_api_key: str
+    gemini_model: str
     sample_rate: int
     tts_voice: str
     telemetry_ws_port: int
@@ -174,6 +178,7 @@ class Settings:
         gemini_api_key = _require_str(env, "GEMINI_API_KEY")
 
         # --- Optional with defaults ---
+        gemini_model = _opt_str(env, "GEMINI_MODEL", "gemini-2.5-flash")
         sample_rate = _opt_int(env, "SAMPLE_RATE", 24000)
         tts_voice = _opt_str(env, "TTS_VOICE", "af_heart")
         telemetry_ws_port = _opt_int(env, "TELEMETRY_WS_PORT", 8765)
@@ -189,6 +194,7 @@ class Settings:
 
         return cls(
             gemini_api_key=gemini_api_key,
+            gemini_model=gemini_model,
             sample_rate=sample_rate,
             tts_voice=tts_voice,
             telemetry_ws_port=telemetry_ws_port,
@@ -201,6 +207,7 @@ class Settings:
         return (
             f"Settings("
             f"gemini_api_key={key_hint}, "
+            f"gemini_model={self.gemini_model!r}, "
             f"sample_rate={self.sample_rate}, "
             f"tts_voice={self.tts_voice!r}, "
             f"telemetry_ws_port={self.telemetry_ws_port}, "
