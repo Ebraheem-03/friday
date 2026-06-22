@@ -1,0 +1,17 @@
+# Build outputs
+dist/
+dist-electron/
+
+# Electron cache (may be created on first run)
+.electron/
+
+# Dependencies — lockfile is committed; the directory itself is not
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/settings.json
+.idea/

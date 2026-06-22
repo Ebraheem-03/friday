@@ -1,4 +1,4 @@
-# FRIDAY CI — lint + test
+# FRIDAY CI — lint + test (Python) + HUD (JS)
 # Triggers on push and PR to dev and main branches.
 # PyGObject requires system GObject introspection libraries; installed via apt below.
 
@@ -38,3 +38,38 @@ jobs:
 
       - name: Run tests
         run: pytest
+
+  hud:
+    name: HUD (Node 20 — typecheck + test + build)
+    runs-on: ubuntu-latest
+    # Skip Electron binary download (~100 MB) — we only typecheck/test/build
+    # the renderer and run pure-function unit tests. Electron is never launched.
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+
+    defaults:
+      run:
+        working-directory: hud
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4.4.0
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: hud/package-lock.json
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      - name: TypeScript typecheck
+        run: npm run typecheck
+
+      - name: Unit tests (vitest)
+        run: npm run test
+
+      - name: Vite renderer build
+        run: npm run build
