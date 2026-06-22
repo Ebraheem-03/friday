@@ -43,6 +43,12 @@ dev = [
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
+# Explicit package list: the repo is a flat layout with several top-level
+# packages, so setuptools auto-discovery refuses to guess. `hud/` is an
+# Electron/JS app (not importable Python) and is intentionally excluded.
+[tool.setuptools]
+packages = ["core", "memory", "voice", "web"]
+
 [tool.ruff]
 line-length = 100
 
