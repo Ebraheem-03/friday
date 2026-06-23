@@ -16,16 +16,73 @@ browser-use import can occur) by setting:
 
     os.environ["ANONYMIZED_TELEMETRY"] = "false"
 
-This is the documented opt-out (https://docs.browser-use.com/development/telemetry).
-It must be set *before* the first ``import browser_use`` because the telemetry
-client initialises at package import. The assignment is at module top-level so
-it runs the moment this file is imported, which is always before the lazy
+browser-use 0.13.1 also performs a PyPI version-check HTTP call on every
+``agent.run()`` (``check_latest_browser_use_version`` in utils.py, gated by
+``CONFIG.BROWSER_USE_VERSION_CHECK``).  We disable this with the second
+module-level env var:
+
+    os.environ["BROWSER_USE_VERSION_CHECK"] = "false"
+
+Both must be set *before* the first ``import browser_use`` because
+``CONFIG`` is constructed at package import time and the property reads
+the env var fresh each time. The assignments are at module top-level so
+they run the moment this file is imported, always before the lazy
 browser-use import inside functions.
+Ref telemetry: https://docs.browser-use.com/development/telemetry
+Ref version-check: browser_use/config.py ``BROWSER_USE_VERSION_CHECK`` property.
 
 Sentinel verification method: grep the installed browser_use package for
-``ANONYMIZED_TELEMETRY`` references and confirm that the telemetry class
-short-circuits on "false". The env var is also logged at DEBUG level on
-WebAgent construction so the test suite can assert it without running a browser.
+``ANONYMIZED_TELEMETRY`` and ``BROWSER_USE_VERSION_CHECK`` references to
+confirm that both the telemetry class and the version-check gate
+short-circuit on "false". The env vars are also logged at DEBUG level on
+WebAgent construction so the test suite can assert them without running a
+browser.
+
+SSRF / private-network filter
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+With ``allow_destructive=True`` the agent can submit forms, follow
+redirects, and POST to any URL the LLM decides to visit.  An attacker (or
+a confused LLM) could direct the agent to ``http://169.254.169.254/`` (the
+AWS/GCP/Azure metadata endpoint) or to ``http://192.168.1.1/admin`` —
+giving the remote Gemini model read access to internal services.
+
+The ``_check_url_allowed`` helper runs a three-layer check on every entry-
+point URL *before* the browser agent is launched and before the cheap
+scrape path fetches:
+
+1. Scheme allowlist: only ``http`` and ``https`` are allowed.  ``file:``,
+   ``ftp:``, ``data:``, etc. are rejected immediately.
+2. IP literal check: the host is parsed as an ``ipaddress`` object. If it
+   parses as a private/loopback/link-local/reserved address it is rejected.
+3. DNS resolution + IP check: ``socket.getaddrinfo`` resolves the hostname
+   and every returned IP is checked with ``ipaddress``. If *any* resolved
+   IP is private/loopback/link-local/reserved the URL is rejected (DNS-
+   rebinding defence). If resolution itself fails the URL is also rejected
+   (fail-closed).
+
+Rejected URLs return a ``"(web blocked) …"`` string immediately; the
+browser agent and scrape fetcher are never called.
+
+Residual risk — mid-task navigation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The pre-flight filter covers the *entry-point* URL passed to ``web_task``.
+It does NOT prevent the agent from navigating to a private IP mid-task
+(e.g. after the LLM decides to ``click`` a link that resolves to 10.x.x.x,
+or follow a redirect from a public page to an internal service).  A complete
+defence would require a CDP ``Network.requestWillBeSent`` intercept that
+fires for every sub-navigation.  browser-use 0.13.1 does not expose a
+per-request CDP hook.  Mitigations in place:
+
+- Safe-mode task prefix (Layer 1) instructs the LLM not to navigate to
+  unusual URLs; still applied when ``allow_destructive=False``.
+- Hard wall-clock timeout prevents prolonged exfiltration even if the LLM
+  does navigate somewhere unexpected.
+- ``on_step_end`` hook logs the current URL after each step so anomalous
+  navigation is visible in DEBUG logs.
+
+Wiring a full CDP ``requestWillBeSent`` filter is deferred as a future
+hardening item requiring either a browser-use fork or a custom
+``BrowserSession`` subclass.
 
 State-changing / destructive action gate
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -45,27 +102,56 @@ Layer 2 — Constructor flag:
     When ``allow_destructive=True`` (opt-in at construction) the prefix is
     omitted and the LLM acts freely.
 
-Limitation / Step 9 hardening item
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-browser-use does not expose a callback that would let us individually approve
-or deny browser actions (click, type, submit) at the Python level in 0.13.1.
-Layer 1 relies on the LLM honouring the instruction prefix — a sufficiently
-adversarial task prompt could cause it to disobey. A true action-level gate
-(intercepting CDP events or monkey-patching browser-use's action executors)
-is deferred to Step 9 hardening. This is surfaced as a Step 9 item below.
+Action-level hook investigation — browser-use 0.13.1
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+**Finding:** browser-use 0.13.1 DOES expose per-step hooks:
 
-Step 9 hardening items
-~~~~~~~~~~~~~~~~~~~~~~~
-- [SEC] WebAgent action-level gate: implement CDP/browser-use hook to
-  intercept form-submit / navigation events and prompt the user before
-  executing. Currently only a task-prefix LLM instruction stops submissions.
-- [SEC] Allowlist/denylist for domains: block browser-use from navigating to
-  internal network addresses (10.x, 192.168.x, localhost) to prevent SSRF.
-- [SEC] Timeout enforcement: add a hard wall-clock timeout on agent.run() to
-  prevent runaway automation.
-- [SEC] Screenshot / extracted_content logging: browser-use may log page
-  screenshots or extracted text internally. Verify at Step 9 that nothing
-  at INFO level exposes PII or credentials.
+- ``Agent.run(on_step_start, on_step_end)`` — both accept an async callable
+  ``Callable[[Agent], Awaitable[None]]`` (``AgentHookFunc``).
+- ``on_step_start`` fires before ``Agent.step()`` (i.e. before the LLM call
+  for that step AND before any browser action is executed that step).
+- ``on_step_end`` fires after each step completes (after actions, before the
+  next step's LLM call).
+- ``Agent.__init__`` also accepts ``register_new_step_callback`` which fires
+  after the LLM produces an output but before the library executes it.
+  Signature: ``Callable[[BrowserStateSummary, AgentOutput, int], None|Awaitable[None]]``.
+
+**What hooks give us:** ``on_step_end`` receives the ``Agent`` object; we can
+inspect ``agent.state.last_result`` and ``agent.browser_session`` to log the
+URL after each step (useful anomaly signal). ``register_new_step_callback``
+gives us the ``AgentOutput.action`` list (a list of ``ActionModel`` objects)
+*after* the LLM decided them but *before* execution in a given step.
+
+**What hooks do NOT give us:** an abort mechanism. ``on_step_start`` and
+``on_step_end`` are fire-and-forget observers — raising inside them
+propagates to browser-use's outer ``run()`` loop and would cancel the whole
+task, but the library does not offer a structured "veto this step" API.
+``register_new_step_callback`` similarly has no return path to abort.
+
+**Decision:** We wire ``on_step_end`` into ``_run_agent`` to log the current
+URL after every step at DEBUG level. This provides post-hoc anomaly
+detection without forking the library. We do NOT attempt to veto individual
+steps via a raised exception (that would produce an ``(web error)`` return
+and is indistinguishable from a legitimate failure; it is also not the
+behaviour ``confirm_callback`` promises — which gates the whole task, not
+individual steps).
+
+Wiring the existing ``confirm_callback`` into an action-level gate is not
+feasible without a library fork: the hooks observe but cannot veto. The
+SSRF filter (entry-point) + hard timeout + safe-mode prefix (when
+``allow_destructive=False``) remain the layered defences for the
+``allow_destructive=True`` case.
+
+This finding and the residual risk (mid-task navigation to private IPs) are
+documented above under "SSRF / private-network filter".
+
+Wall-clock timeout
+~~~~~~~~~~~~~~~~~~~
+``agent.run(...)`` is wrapped in ``asyncio.wait_for(..., timeout=timeout_s)``
+(constructor param, default 120 s). On cancellation the task is cleaned up
+by asyncio and ``web_task`` returns a ``"(web error) task exceeded …"``
+string. The scrape path (``_try_scrape``) also passes the timeout as a
+``requests``-style cap via ``_try_scrape_timeout``.
 
 Routing heuristic
 -----------------
@@ -104,9 +190,13 @@ during CI or tests — the browser is fully mocked.
 
 from __future__ import annotations
 
+import asyncio
+import ipaddress
 import logging
 import os
+import socket
 from typing import TYPE_CHECKING, Callable
+from urllib.parse import urlparse
 
 # ---------------------------------------------------------------------------
 # Telemetry opt-out — MUST happen before any browser_use import.
@@ -116,6 +206,16 @@ from typing import TYPE_CHECKING, Callable
 # Ref: https://docs.browser-use.com/development/telemetry
 # ---------------------------------------------------------------------------
 os.environ.setdefault("ANONYMIZED_TELEMETRY", "false")
+
+# ---------------------------------------------------------------------------
+# Version-check opt-out — browser-use 0.13.1 calls check_latest_browser_use_version()
+# (an async HTTP request to PyPI) on every agent.run().  This is uninvited
+# network egress.  CONFIG.BROWSER_USE_VERSION_CHECK reads this env var as a
+# property on each call so setting it at module load time is sufficient.
+# Ref: browser_use/config.py BROWSER_USE_VERSION_CHECK property;
+#      browser_use/agent/service.py line ~2037.
+# ---------------------------------------------------------------------------
+os.environ.setdefault("BROWSER_USE_VERSION_CHECK", "false")
 
 from core.config import Settings
 
@@ -140,6 +240,128 @@ _SAFE_MODE_PREFIX: str = (
 )
 
 # ---------------------------------------------------------------------------
+# SSRF / private-network filter
+# ---------------------------------------------------------------------------
+
+# Schemes that are allowed through the filter.  Everything else (file:, ftp:,
+# data:, javascript:, blob:, etc.) is rejected.
+_ALLOWED_SCHEMES: frozenset[str] = frozenset({"http", "https"})
+
+_BLOCKED_RESULT_PREFIX = "(web blocked) refused to access internal/loopback address"
+
+
+def _check_url_allowed(url: str) -> str | None:
+    """Return None if the URL is safe to fetch; a ``(web blocked) …`` string if not.
+
+    Three-layer check:
+    1. Scheme: must be http or https.
+    2. Host as IP literal: checked directly with ``ipaddress``.
+    3. DNS resolution: ``socket.getaddrinfo`` resolves hostnames; every
+       returned address is checked.  If resolution fails → fail-closed.
+
+    Only the host is inspected (never query strings or path segments) to
+    keep logging metadata-safe and to avoid false positives.
+    """
+    if not url or not url.strip():
+        return f"{_BLOCKED_RESULT_PREFIX}: empty URL"
+
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return f"{_BLOCKED_RESULT_PREFIX}: could not parse URL"
+
+    # --- 1. Scheme check ---------------------------------------------------
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in _ALLOWED_SCHEMES:
+        return (
+            f"(web blocked) scheme '{scheme}' is not allowed "
+            "(only http and https are permitted)"
+        )
+
+    host = parsed.hostname or ""
+    if not host:
+        return f"{_BLOCKED_RESULT_PREFIX}: no host in URL"
+
+    # Strip IPv6 brackets if present (urlparse.hostname already does this,
+    # but guard defensively).
+    host_clean = host.strip("[]")
+
+    # --- 2. IP literal check -----------------------------------------------
+    try:
+        addr = ipaddress.ip_address(host_clean)
+        if _is_private_addr(addr):
+            logger.debug(
+                "WebAgent SSRF block: IP literal %s is private/loopback/link-local",
+                host_clean,
+            )
+            return f"{_BLOCKED_RESULT_PREFIX}: {host_clean}"
+    except ValueError:
+        # Not an IP literal — fall through to DNS resolution.
+        pass
+
+    # --- 3. DNS resolution check -------------------------------------------
+    try:
+        addrinfos = socket.getaddrinfo(host_clean, None)
+    except socket.gaierror as exc:
+        # Resolution failed — fail closed (reject).
+        logger.debug(
+            "WebAgent SSRF block: DNS resolution failed for host=%r: %s", host_clean, exc
+        )
+        return (
+            f"(web blocked) could not resolve host '{host_clean}': "
+            "DNS lookup failed (fail-closed)"
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "WebAgent SSRF block: unexpected error resolving host=%r: %s",
+            host_clean,
+            type(exc).__name__,
+        )
+        return (
+            f"(web blocked) could not resolve host '{host_clean}': "
+            f"{type(exc).__name__}"
+        )
+
+    for _family, _type, _proto, _canonname, sockaddr in addrinfos:
+        ip_str = sockaddr[0]
+        try:
+            addr = ipaddress.ip_address(ip_str)
+            if _is_private_addr(addr):
+                logger.debug(
+                    "WebAgent SSRF block: host=%r resolved to private IP %s",
+                    host_clean,
+                    ip_str,
+                )
+                return f"{_BLOCKED_RESULT_PREFIX}: {host_clean} resolves to {ip_str}"
+        except ValueError:
+            continue  # Shouldn't happen — getaddrinfo always returns valid IPs
+
+    return None  # All checks passed
+
+
+def _is_private_addr(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Return True if *addr* is private, loopback, link-local, or otherwise reserved.
+
+    Covers:
+    - 127.0.0.0/8 (IPv4 loopback)
+    - 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 (RFC-1918 private)
+    - 169.254.0.0/16 (link-local — includes the cloud metadata IP 169.254.169.254)
+    - ::1 (IPv6 loopback)
+    - fc00::/7 (IPv6 unique-local)
+    - fe80::/10 (IPv6 link-local)
+    - Any other address flagged as private/loopback/link-local by ``ipaddress``.
+    """
+    return (
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_reserved
+        or addr.is_multicast
+        or addr.is_unspecified
+    )
+
+
+# ---------------------------------------------------------------------------
 # WebAgent
 # ---------------------------------------------------------------------------
 
@@ -162,12 +384,16 @@ class WebAgent:
         Optional hook called with a human-readable description of the task
         before the agent runs. Return ``True`` to proceed, ``False`` to abort.
         When ``None`` (default), the agent runs without a pre-flight prompt.
-        This is the coarse-grained gate; fine-grained action interception is a
-        Step 9 hardening item.
+        This is the coarse-grained gate; fine-grained action interception is
+        not achievable without a library fork — see module docstring.
     max_steps:
         Hard cap on the number of browser-use agent steps per task. Prevents
         runaway automation. Defaults to 20 (conservative; raise if tasks need
         more steps).
+    timeout_s:
+        Hard wall-clock timeout in seconds for the full ``agent.run()`` call.
+        If the agent has not completed within this time it is cancelled and
+        ``web_task`` returns an error string. Default: 120 s.
     """
 
     def __init__(
@@ -177,19 +403,23 @@ class WebAgent:
         allow_destructive: bool = False,
         confirm_callback: Callable[[str], bool] | None = None,
         max_steps: int = 20,
+        timeout_s: float = 120.0,
     ) -> None:
         self._settings = settings
         self._allow_destructive = allow_destructive
         self._confirm_callback = confirm_callback
         self._max_steps = max_steps
+        self._timeout_s = timeout_s
 
         logger.debug(
             "WebAgent initialised: model=%r allow_destructive=%r max_steps=%d "
-            "ANONYMIZED_TELEMETRY=%r",
+            "timeout_s=%.1f ANONYMIZED_TELEMETRY=%r BROWSER_USE_VERSION_CHECK=%r",
             settings.gemini_model,
             allow_destructive,
             max_steps,
+            timeout_s,
             os.environ.get("ANONYMIZED_TELEMETRY"),
+            os.environ.get("BROWSER_USE_VERSION_CHECK"),
         )
 
     # ------------------------------------------------------------------
@@ -237,6 +467,17 @@ class WebAgent:
 
     async def _execute(self, task: str, url: str) -> str:
         """Route task to scrape or agentic path, honouring the safe-mode gate."""
+        # --- SSRF pre-flight check -----------------------------------------
+        # Validate the entry-point URL before any network activity.
+        # This covers the scrape path AND the browser agent entry point.
+        if url:
+            blocked = _check_url_allowed(url)
+            if blocked is not None:
+                logger.debug(
+                    "WebAgent: SSRF filter blocked url host=%s", _safe_host(url)
+                )
+                return blocked
+
         # --- Confirm gate (coarse) -----------------------------------------
         if self._confirm_callback is not None:
             description = f"web_task: {task[:120]}" + (f" @ {url}" if url else "")
@@ -280,9 +521,10 @@ class WebAgent:
             effective_task = f"{effective_task}\nStarting URL: {url}"
 
         logger.debug(
-            "WebAgent: launching browser agent task_len=%d url=%r",
+            "WebAgent: launching browser agent task_len=%d url=%r timeout_s=%.1f",
             len(effective_task),
             _safe_host(url) if url else "",
+            self._timeout_s,
         )
 
         # --- LLM construction (reuse FRIDAY's Gemini config) ---------------
@@ -299,18 +541,56 @@ class WebAgent:
             logger.debug("WebAgent: ChatGoogle construction failed: %s", type(exc).__name__)
             return f"(web error) Failed to initialise LLM: {type(exc).__name__}: {exc}"
 
-        # --- Agent construction + run ---------------------------------------
+        # --- Agent construction + run with wall-clock timeout --------------
         # NOTE: max_steps is a parameter of Agent.run(), NOT Agent.__init__().
         # Passing it to the constructor would be silently swallowed by **kwargs
         # and the cap would never be applied — a live-only bug CI cannot catch.
         # Verified against browser-use 0.13.1 source: Agent.__init__ signature
         # has no max_steps param; Agent.run(max_steps: int = 500) does.
+        #
+        # on_step_end hook: logs the current browser URL after each step at
+        # DEBUG level for post-hoc anomaly detection (mid-task navigation
+        # monitoring). See module docstring "Action-level hook investigation"
+        # for full rationale. The hook is observation-only; it does NOT abort
+        # steps.
+        #
+        # asyncio.wait_for wraps the entire run() call with a hard wall-clock
+        # cap (self._timeout_s). On timeout, asyncio.CancelledError propagates
+        # out of wait_for; we catch it and return a structured error string.
         try:
             agent = Agent(
                 task=effective_task,
                 llm=llm,
             )
-            history = await agent.run(max_steps=self._max_steps)
+
+            async def _on_step_end(ag: object) -> None:
+                """Log current URL after each step for anomaly detection."""
+                try:
+                    sess = getattr(ag, "browser_session", None)
+                    if sess is not None:
+                        current_url = getattr(sess, "current_url", None)
+                        if current_url:
+                            logger.debug(
+                                "WebAgent step complete, current_host=%s",
+                                _safe_host(str(current_url)),
+                            )
+                except Exception:  # noqa: BLE001
+                    pass  # Never let the hook crash the step
+
+            history = await asyncio.wait_for(
+                agent.run(max_steps=self._max_steps, on_step_end=_on_step_end),
+                timeout=self._timeout_s,
+            )
+        except asyncio.TimeoutError:
+            logger.debug(
+                "WebAgent: agent.run() exceeded timeout_s=%.1f", self._timeout_s
+            )
+            return (
+                f"(web error) task exceeded {self._timeout_s:.0f}s and was aborted"
+            )
+        except asyncio.CancelledError:
+            logger.debug("WebAgent: agent.run() was cancelled")
+            return f"(web error) task exceeded {self._timeout_s:.0f}s and was aborted"
         except Exception as exc:  # noqa: BLE001
             logger.debug(
                 "WebAgent: agent.run() raised %s", type(exc).__name__
@@ -422,8 +702,6 @@ def _is_read_only_task(task: str) -> bool:
 
 def _safe_host(url: str) -> str:
     """Return just the hostname for metadata-safe logging."""
-    from urllib.parse import urlparse
-
     try:
         return urlparse(url).netloc or url[:80]
     except Exception:

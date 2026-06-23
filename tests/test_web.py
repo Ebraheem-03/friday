@@ -16,14 +16,19 @@ Coverage
 - Graceful degradation when scrapling is not installed.
 - Safe-mode / confirm gate for state-changing actions.
 - Telemetry opt-out env var is set before any browser-use import.
+- Version-check opt-out env var is set before any browser-use import.
 - isinstance(agent, WebTool) against the runtime_checkable Protocol.
+- SSRF / private-network filter blocks loopback, RFC-1918, link-local, file://.
+- Hard wall-clock timeout: hung agent.run() returns timeout string, never raises.
 
 Baseline: 234 passed, 2 skipped.  This file must only add to the passed count.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
+import socket
 import sys
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -92,6 +97,27 @@ def _patch_browser_use(agent_run_return: Any = None, agent_run_raises: Exception
 
     mock_bu.ChatGoogle.return_value = MagicMock()
     return patch.dict("sys.modules", {"browser_use": mock_bu})
+
+
+def _patch_public_dns(public_ip: str = "93.184.216.34"):
+    """Context manager: mock socket.getaddrinfo to return a known public IP.
+
+    Used in tests that pass a real hostname (e.g. 'example.com') through the
+    SSRF filter so that they don't depend on live DNS resolution in CI.
+    The public IP 93.184.216.34 is IANA's example.com — unambiguously not
+    private, so the SSRF filter passes it through.
+    """
+    fake_addrinfo = [(socket.AF_INET, socket.SOCK_STREAM, 0, "", (public_ip, 0))]
+    return patch("web.agent.socket.getaddrinfo", return_value=fake_addrinfo)
+
+
+def _patch_ssrf_allowed():
+    """Context manager: make _check_url_allowed always return None (allow).
+
+    Use this in tests that are NOT testing the SSRF filter itself and just
+    need the execution to proceed past the URL check.
+    """
+    return patch("web.agent._check_url_allowed", return_value=None)
 
 
 def _patch_scrapling(
@@ -230,7 +256,7 @@ class TestWebAgentHappyPath:
         from web.agent import WebAgent
 
         history = _make_history(final="Scraped content here.")
-        with _patch_browser_use(agent_run_return=history):
+        with _patch_ssrf_allowed(), _patch_browser_use(agent_run_return=history):
             agent = WebAgent(_fake_settings(), allow_destructive=True)
             result = await agent.web_task("Read the page", url="https://example.com")
 
@@ -369,7 +395,7 @@ class TestSafeModeGate:
         mock_bu.Agent.side_effect = _capture_agent
         mock_bu.ChatGoogle.return_value = MagicMock()
 
-        with patch.dict("sys.modules", {"browser_use": mock_bu}):
+        with _patch_ssrf_allowed(), patch.dict("sys.modules", {"browser_use": mock_bu}):
             agent = WebAgent(_fake_settings(), allow_destructive=False)
             await agent.web_task("Submit this form", url="https://example.com/form")
 
@@ -397,7 +423,7 @@ class TestSafeModeGate:
         mock_bu.Agent.side_effect = _capture_agent
         mock_bu.ChatGoogle.return_value = MagicMock()
 
-        with patch.dict("sys.modules", {"browser_use": mock_bu}):
+        with _patch_ssrf_allowed(), patch.dict("sys.modules", {"browser_use": mock_bu}):
             agent = WebAgent(_fake_settings(), allow_destructive=True)
             await agent.web_task("Buy the product", url="https://example.com/buy")
 
@@ -633,7 +659,7 @@ class TestRoutingHeuristic:
         mock_bu.Agent.return_value.run = AsyncMock(return_value=_make_history())
         mock_bu.ChatGoogle.return_value = MagicMock()
 
-        with _patch_scrapling(text="Scrapling result here"):
+        with _patch_ssrf_allowed(), _patch_scrapling(text="Scrapling result here"):
             with patch.dict("sys.modules", {"browser_use": mock_bu}):
                 # Patch _try_scrape to track calls
                 with patch("web.agent._try_scrape") as mock_scrape:
@@ -658,7 +684,7 @@ class TestRoutingHeuristic:
         mock_bu.Agent.return_value.run = AsyncMock(return_value=history)
         mock_bu.ChatGoogle.return_value = MagicMock()
 
-        with patch.dict("sys.modules", {"browser_use": mock_bu}):
+        with _patch_ssrf_allowed(), patch.dict("sys.modules", {"browser_use": mock_bu}):
             with patch("web.agent._try_scrape") as mock_scrape:
                 agent = WebAgent(_fake_settings(), allow_destructive=True)
                 await agent.web_task("click the login button", url="https://example.com")
@@ -675,7 +701,7 @@ class TestRoutingHeuristic:
         mock_bu.Agent.return_value.run = AsyncMock(return_value=history)
         mock_bu.ChatGoogle.return_value = MagicMock()
 
-        with patch.dict("sys.modules", {"browser_use": mock_bu}):
+        with _patch_ssrf_allowed(), patch.dict("sys.modules", {"browser_use": mock_bu}):
             with patch("web.agent._try_scrape", return_value=None):
                 agent = WebAgent(_fake_settings(), allow_destructive=True)
                 result = await agent.web_task("read the page", url="https://example.com")
@@ -821,3 +847,430 @@ class TestMaxStepsKwarg:
         assert run_kwargs[0].get("max_steps") == 7, (
             f"agent.run() was not called with max_steps=7; got run kwargs: {run_kwargs}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests: SSRF / private-network filter  (Step 9 hardening)
+# ---------------------------------------------------------------------------
+
+
+class TestSSRFFilter:
+    """_check_url_allowed blocks private/loopback/link-local IPs and bad schemes."""
+
+    # ---- scheme checks -------------------------------------------------------
+
+    def test_file_scheme_blocked(self) -> None:
+        """file:// URLs are rejected regardless of host."""
+        from web.agent import _check_url_allowed
+
+        result = _check_url_allowed("file:///etc/passwd")
+        assert result is not None
+        assert "blocked" in result.lower() or "scheme" in result.lower()
+
+    def test_ftp_scheme_blocked(self) -> None:
+        """ftp:// URLs are rejected."""
+        from web.agent import _check_url_allowed
+
+        result = _check_url_allowed("ftp://files.example.com/pub")
+        assert result is not None
+        assert "blocked" in result.lower() or "scheme" in result.lower()
+
+    def test_javascript_scheme_blocked(self) -> None:
+        """javascript: URLs are rejected."""
+        from web.agent import _check_url_allowed
+
+        result = _check_url_allowed("javascript:alert(1)")
+        assert result is not None
+        assert "blocked" in result.lower() or "scheme" in result.lower()
+
+    # ---- IP literal checks ---------------------------------------------------
+
+    def test_loopback_127_blocked(self) -> None:
+        """127.0.0.1 (IPv4 loopback) is blocked."""
+        from web.agent import _check_url_allowed
+
+        result = _check_url_allowed("http://127.0.0.1/admin")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+    def test_loopback_127_x_blocked(self) -> None:
+        """127.x.x.x range is blocked (full /8)."""
+        from web.agent import _check_url_allowed
+
+        result = _check_url_allowed("http://127.0.0.100/secret")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+    def test_rfc1918_10_x_blocked(self) -> None:
+        """10.0.0.0/8 (RFC-1918) is blocked."""
+        from web.agent import _check_url_allowed
+
+        result = _check_url_allowed("http://10.0.0.1/")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+    def test_rfc1918_172_16_blocked(self) -> None:
+        """172.16.0.0/12 (RFC-1918) is blocked."""
+        from web.agent import _check_url_allowed
+
+        result = _check_url_allowed("http://172.16.0.1/internal")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+    def test_rfc1918_192_168_blocked(self) -> None:
+        """192.168.0.0/16 (RFC-1918) is blocked."""
+        from web.agent import _check_url_allowed
+
+        result = _check_url_allowed("http://192.168.1.1/router")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+    def test_link_local_169_254_blocked(self) -> None:
+        """169.254.0.0/16 (link-local) is blocked."""
+        from web.agent import _check_url_allowed
+
+        result = _check_url_allowed("http://169.254.1.1/")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+    def test_cloud_metadata_ip_blocked(self) -> None:
+        """169.254.169.254 (cloud metadata endpoint) is blocked."""
+        from web.agent import _check_url_allowed
+
+        result = _check_url_allowed("http://169.254.169.254/latest/meta-data/")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+    def test_ipv6_loopback_blocked(self) -> None:
+        """::1 (IPv6 loopback) is blocked."""
+        from web.agent import _check_url_allowed
+
+        result = _check_url_allowed("http://[::1]/admin")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+    def test_ipv6_unique_local_blocked(self) -> None:
+        """fc00::/7 (IPv6 unique-local) is blocked."""
+        from web.agent import _check_url_allowed
+
+        result = _check_url_allowed("http://[fc00::1]/")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+    # ---- DNS-based checks ----------------------------------------------------
+
+    def test_localhost_hostname_blocked(self) -> None:
+        """'localhost' resolves to 127.0.0.1 — must be blocked via DNS check."""
+        from web.agent import _check_url_allowed
+
+        # Patch getaddrinfo to simulate localhost resolution to 127.0.0.1
+        fake_addrinfo = [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 0))]
+        with patch("web.agent.socket.getaddrinfo", return_value=fake_addrinfo):
+            result = _check_url_allowed("http://localhost/")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+    def test_dns_rebind_10x_blocked(self) -> None:
+        """A public-looking hostname that resolves to 10.x.x.x is blocked."""
+        from web.agent import _check_url_allowed
+
+        fake_addrinfo = [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("10.42.0.1", 0))]
+        with patch("web.agent.socket.getaddrinfo", return_value=fake_addrinfo):
+            result = _check_url_allowed("http://totally-public.example.com/")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+    def test_dns_resolution_failure_fail_closed(self) -> None:
+        """If DNS resolution fails, the URL is rejected (fail-closed)."""
+        from web.agent import _check_url_allowed
+
+        with patch(
+            "web.agent.socket.getaddrinfo",
+            side_effect=socket.gaierror("name or service not known"),
+        ):
+            result = _check_url_allowed("http://nonexistent.invalid/")
+        assert result is not None
+        assert "blocked" in result.lower() or "resolve" in result.lower()
+
+    # ---- Public hosts are allowed through ------------------------------------
+
+    def test_public_ip_allowed(self) -> None:
+        """A public IP is allowed through; _check_url_allowed returns None."""
+        from web.agent import _check_url_allowed
+
+        # 93.184.216.34 is IANA example.com — public, not private
+        fake_addrinfo = [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 0))]
+        with patch("web.agent.socket.getaddrinfo", return_value=fake_addrinfo):
+            result = _check_url_allowed("https://example.com/page")
+        assert result is None, f"expected None (allowed) but got: {result!r}"
+
+    @pytest.mark.asyncio
+    async def test_public_host_reaches_agent(self) -> None:
+        """A public URL is not blocked and proceeds to the agent."""
+        from web.agent import WebAgent
+
+        mock_bu = MagicMock()
+        history = _make_history(final="public result")
+        mock_bu.Agent.return_value.run = AsyncMock(return_value=history)
+        mock_bu.ChatGoogle.return_value = MagicMock()
+
+        fake_addrinfo = [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 0))]
+        with patch("web.agent.socket.getaddrinfo", return_value=fake_addrinfo):
+            with patch.dict("sys.modules", {"browser_use": mock_bu}):
+                agent = WebAgent(_fake_settings(), allow_destructive=True)
+                result = await agent.web_task("click the button", url="https://example.com")
+
+        assert isinstance(result, str)
+        assert "public result" in result
+
+    # ---- web_task returns blocked string and does NOT call agent/fetcher -----
+
+    @pytest.mark.asyncio
+    async def test_web_task_blocks_localhost_url(self) -> None:
+        """web_task blocks localhost before reaching the agent."""
+        from web.agent import WebAgent
+
+        mock_bu = MagicMock()
+        mock_bu.Agent.return_value.run = AsyncMock(return_value=_make_history())
+        mock_bu.ChatGoogle.return_value = MagicMock()
+
+        fake_addrinfo = [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 0))]
+        with patch("web.agent.socket.getaddrinfo", return_value=fake_addrinfo):
+            with patch.dict("sys.modules", {"browser_use": mock_bu}):
+                agent = WebAgent(_fake_settings(), allow_destructive=True)
+                result = await agent.web_task("do something", url="http://localhost/api")
+
+        assert isinstance(result, str)
+        assert "blocked" in result.lower()
+        # Agent must NOT have been called
+        mock_bu.Agent.return_value.run.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_web_task_blocks_127x_url(self) -> None:
+        """web_task blocks 127.x.x.x IP literal URLs."""
+        from web.agent import WebAgent
+
+        mock_bu = MagicMock()
+        mock_bu.Agent.return_value.run = AsyncMock(return_value=_make_history())
+        mock_bu.ChatGoogle.return_value = MagicMock()
+
+        with patch.dict("sys.modules", {"browser_use": mock_bu}):
+            agent = WebAgent(_fake_settings(), allow_destructive=True)
+            result = await agent.web_task("do something", url="http://127.0.0.1/")
+
+        assert isinstance(result, str)
+        assert "blocked" in result.lower()
+        mock_bu.Agent.return_value.run.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_web_task_blocks_10x_url(self) -> None:
+        """web_task blocks 10.x.x.x IP literal URLs."""
+        from web.agent import WebAgent
+
+        mock_bu = MagicMock()
+        mock_bu.Agent.return_value.run = AsyncMock(return_value=_make_history())
+        mock_bu.ChatGoogle.return_value = MagicMock()
+
+        with patch.dict("sys.modules", {"browser_use": mock_bu}):
+            agent = WebAgent(_fake_settings(), allow_destructive=True)
+            result = await agent.web_task("do something", url="http://10.0.0.1/")
+
+        assert isinstance(result, str)
+        assert "blocked" in result.lower()
+        mock_bu.Agent.return_value.run.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_web_task_blocks_192_168_url(self) -> None:
+        """web_task blocks 192.168.x.x IP literal URLs."""
+        from web.agent import WebAgent
+
+        mock_bu = MagicMock()
+        mock_bu.Agent.return_value.run = AsyncMock(return_value=_make_history())
+        mock_bu.ChatGoogle.return_value = MagicMock()
+
+        with patch.dict("sys.modules", {"browser_use": mock_bu}):
+            agent = WebAgent(_fake_settings(), allow_destructive=True)
+            result = await agent.web_task("do something", url="http://192.168.0.1/")
+
+        assert isinstance(result, str)
+        assert "blocked" in result.lower()
+        mock_bu.Agent.return_value.run.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_web_task_blocks_169_254_metadata_url(self) -> None:
+        """web_task blocks cloud metadata IP 169.254.169.254."""
+        from web.agent import WebAgent
+
+        mock_bu = MagicMock()
+        mock_bu.Agent.return_value.run = AsyncMock(return_value=_make_history())
+        mock_bu.ChatGoogle.return_value = MagicMock()
+
+        with patch.dict("sys.modules", {"browser_use": mock_bu}):
+            agent = WebAgent(_fake_settings(), allow_destructive=True)
+            result = await agent.web_task(
+                "get credentials",
+                url="http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+            )
+
+        assert isinstance(result, str)
+        assert "blocked" in result.lower()
+        mock_bu.Agent.return_value.run.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_web_task_blocks_ipv6_loopback_url(self) -> None:
+        """web_task blocks ::1 (IPv6 loopback) URLs."""
+        from web.agent import WebAgent
+
+        mock_bu = MagicMock()
+        mock_bu.Agent.return_value.run = AsyncMock(return_value=_make_history())
+        mock_bu.ChatGoogle.return_value = MagicMock()
+
+        with patch.dict("sys.modules", {"browser_use": mock_bu}):
+            agent = WebAgent(_fake_settings(), allow_destructive=True)
+            result = await agent.web_task("access local", url="http://[::1]/admin")
+
+        assert isinstance(result, str)
+        assert "blocked" in result.lower()
+        mock_bu.Agent.return_value.run.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_web_task_blocks_file_scheme(self) -> None:
+        """web_task blocks file:// URLs."""
+        from web.agent import WebAgent
+
+        mock_bu = MagicMock()
+        mock_bu.Agent.return_value.run = AsyncMock(return_value=_make_history())
+        mock_bu.ChatGoogle.return_value = MagicMock()
+
+        with patch.dict("sys.modules", {"browser_use": mock_bu}):
+            agent = WebAgent(_fake_settings(), allow_destructive=True)
+            result = await agent.web_task("read file", url="file:///etc/passwd")
+
+        assert isinstance(result, str)
+        assert "blocked" in result.lower()
+        mock_bu.Agent.return_value.run.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Tests: hard wall-clock timeout  (Step 9 hardening)
+# ---------------------------------------------------------------------------
+
+
+class TestHardTimeout:
+    @pytest.mark.asyncio
+    async def test_hung_agent_returns_timeout_string(self) -> None:
+        """A hung agent.run() is cancelled and web_task returns the timeout string."""
+        from web.agent import WebAgent
+
+        # Make agent.run() hang forever by waiting on an Event that never fires.
+        hang_event = asyncio.Event()
+
+        async def _hang(**_kw: Any) -> Any:
+            await hang_event.wait()  # hangs indefinitely
+
+        mock_bu = MagicMock()
+        mock_bu.Agent.return_value.run = AsyncMock(side_effect=_hang)
+        mock_bu.ChatGoogle.return_value = MagicMock()
+
+        with patch.dict("sys.modules", {"browser_use": mock_bu}):
+            agent = WebAgent(_fake_settings(), allow_destructive=True, timeout_s=0.05)
+            result = await agent.web_task("do something that hangs")
+
+        assert isinstance(result, str)
+        assert "error" in result.lower()
+        assert "exceeded" in result.lower() or "aborted" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_timeout_does_not_raise(self) -> None:
+        """A timeout must never propagate an exception out of web_task."""
+        from web.agent import WebAgent
+
+        hang_event = asyncio.Event()
+
+        async def _hang(**_kw: Any) -> Any:
+            await hang_event.wait()
+
+        mock_bu = MagicMock()
+        mock_bu.Agent.return_value.run = AsyncMock(side_effect=_hang)
+        mock_bu.ChatGoogle.return_value = MagicMock()
+
+        with patch.dict("sys.modules", {"browser_use": mock_bu}):
+            agent = WebAgent(_fake_settings(), allow_destructive=True, timeout_s=0.05)
+            # Must not raise — if it does, pytest will report an exception
+            result = await agent.web_task("hang task")
+
+        assert isinstance(result, str)
+
+    @pytest.mark.asyncio
+    async def test_timeout_string_mentions_seconds(self) -> None:
+        """The timeout error string should mention the configured timeout value."""
+        from web.agent import WebAgent
+
+        hang_event = asyncio.Event()
+
+        async def _hang(**_kw: Any) -> Any:
+            await hang_event.wait()
+
+        mock_bu = MagicMock()
+        mock_bu.Agent.return_value.run = AsyncMock(side_effect=_hang)
+        mock_bu.ChatGoogle.return_value = MagicMock()
+
+        with patch.dict("sys.modules", {"browser_use": mock_bu}):
+            agent = WebAgent(_fake_settings(), allow_destructive=True, timeout_s=0.05)
+            result = await agent.web_task("task")
+
+        # The timeout value should appear in the error string (as "0s" after rounding)
+        assert "0s" in result or "exceeded" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_fast_agent_not_affected_by_timeout(self) -> None:
+        """A fast agent.run() completes normally before the timeout fires."""
+        from web.agent import WebAgent
+
+        mock_bu = MagicMock()
+        history = _make_history(final="done quickly")
+        mock_bu.Agent.return_value.run = AsyncMock(return_value=history)
+        mock_bu.ChatGoogle.return_value = MagicMock()
+
+        with patch.dict("sys.modules", {"browser_use": mock_bu}):
+            # Generous timeout — the mock returns immediately
+            agent = WebAgent(_fake_settings(), allow_destructive=True, timeout_s=30.0)
+            result = await agent.web_task("quick task")
+
+        assert isinstance(result, str)
+        assert "done quickly" in result
+        assert "exceeded" not in result.lower()
+
+
+# ---------------------------------------------------------------------------
+# Tests: version-check opt-out env var  (Step 9 hardening)
+# ---------------------------------------------------------------------------
+
+
+class TestVersionCheckDisable:
+    def test_browser_use_version_check_env_var_is_set_on_import(self) -> None:
+        """BROWSER_USE_VERSION_CHECK must be 'false' after importing web.agent.
+
+        The assignment at module top-level fires before any browser-use import
+        and before any test runs, mirroring the ANONYMIZED_TELEMETRY opt-out.
+        """
+        import web.agent  # noqa: F401
+
+        value = os.environ.get("BROWSER_USE_VERSION_CHECK", "")
+        assert value.lower() == "false", (
+            f"BROWSER_USE_VERSION_CHECK should be 'false', got {value!r}"
+        )
+
+    def test_version_check_disabled_before_browser_use_import(self) -> None:
+        """The env var is set at module level — fires before any lazy import."""
+        saved = sys.modules.pop("web.agent", None)
+        old_val = os.environ.pop("BROWSER_USE_VERSION_CHECK", None)
+        try:
+            import web.agent  # noqa: F401
+
+            assert os.environ.get("BROWSER_USE_VERSION_CHECK") == "false"
+        finally:
+            if old_val is not None:
+                os.environ["BROWSER_USE_VERSION_CHECK"] = old_val
+            if saved is not None:
+                sys.modules["web.agent"] = saved
