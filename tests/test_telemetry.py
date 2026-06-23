@@ -42,6 +42,7 @@ def _make_settings(port: int = 8765) -> Settings:
         gemini_model="gemini-2.5-flash",
         sample_rate=24000,
         tts_voice="af_heart",
+        stt_model="base.en",
         telemetry_ws_port=port,
         log_level="DEBUG",
     )
