@@ -94,10 +94,31 @@ class TestBuildApp:
         app = build_app(self.settings)
         assert isinstance(app.web_agent, WebAgent)
 
-    def test_os_bridge_trusted_false(self) -> None:
-        """Locked human decision: OsBridge must be trusted=False."""
+    def test_os_bridge_exec_mode(self) -> None:
+        """Locked human decision: live execution — trusted synthetic input,
+        confirmed run_command."""
         app = build_app(self.settings)
-        assert app.os_bridge._trusted is False
+        # click/type run freely (trusted); run_command still gated via callback.
+        assert app.os_bridge._trusted is True
+        # dry_run off → gated actions actually execute once confirmed.
+        assert app.os_bridge._dry_run is False
+        # a confirm callback is wired for the always-gated run_command.
+        assert app.os_bridge._confirm_callback is not None
+
+    def test_console_confirm_denies_non_yes(self, monkeypatch) -> None:
+        """_console_confirm returns True only on explicit y/yes; EOF denies."""
+        from core import app as app_mod
+
+        monkeypatch.setattr("builtins.input", lambda _prompt: "y")
+        assert app_mod._console_confirm("run_command binary='ls'") is True
+        monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+        assert app_mod._console_confirm("run_command binary='rm'") is False
+
+        def _raise_eof(_prompt: str) -> str:
+            raise EOFError
+
+        monkeypatch.setattr("builtins.input", _raise_eof)
+        assert app_mod._console_confirm("run_command binary='rm'") is False
 
     def test_web_agent_allow_destructive_true(self) -> None:
         """Locked human decision: WebAgent must be allow_destructive=True."""

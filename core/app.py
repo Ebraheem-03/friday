@@ -123,6 +123,33 @@ class App:
 
 
 # ---------------------------------------------------------------------------
+# Console confirm callback for gated OS actions (run_command)
+# ---------------------------------------------------------------------------
+
+
+def _console_confirm(description: str) -> bool:
+    """Prompt the operator on the console to approve a gated OS action.
+
+    Wired into ``OsBridge`` for ``run_command`` (which stays gated even in
+    trusted mode). Returns True only on an explicit 'y'/'yes'.
+
+    NOTE: this is a blocking ``input()`` call — it intentionally pauses the
+    assistant until the human answers, because executing an arbitrary command
+    warrants deliberate attention. The description is the redacted action label
+    (binary name only; never the full argv — see OsBridge M-2 hardening), so no
+    secret in an argument is printed here. A non-interactive stdin (EOF) is
+    treated as a denial (fail-safe). A richer HUD-based async confirm is a
+    tracked follow-up.
+    """
+    try:
+        answer = input(f"\n[FRIDAY] Approve OS action — {description}? [y/N] ")
+    except EOFError:
+        logger.warning("Console confirm: no interactive stdin — denying.")
+        return False
+    return answer.strip().lower() in ("y", "yes")
+
+
+# ---------------------------------------------------------------------------
 # Layer 1: build_app — pure construction, no I/O
 # ---------------------------------------------------------------------------
 
@@ -154,8 +181,17 @@ def build_app(settings: Settings) -> App:
     # --- Memory (mnemo) -------------------------------------------------------
     memory = Memory()
 
-    # --- OS bridge (vector): trusted=False (locked human decision) -----------
-    os_bridge = OsBridge(trusted=False)
+    # --- OS bridge (vector): live execution, trusted synthetic input + ------
+    # confirmed commands (locked human decision).
+    #   dry_run=False        → actions actually execute (not simulated).
+    #   trusted=True         → click/type run freely (hands-free synthetic input).
+    #   confirm_callback=... → run_command (always gated even when trusted) asks
+    #                          for an explicit console y/N before executing.
+    os_bridge = OsBridge(
+        dry_run=False,
+        trusted=True,
+        confirm_callback=_console_confirm,
+    )
 
     # --- Web agent (scout): allow_destructive=True (locked human decision) --
     web_agent = WebAgent(settings, allow_destructive=True)
@@ -410,6 +446,12 @@ async def run(app: App, settings: Settings) -> None:
             logger.info("HUD disabled (FRIDAY_NO_HUD is set).")
 
         # -- 4. Start orchestrator --------------------------------------------
+        # Make the OS-execution posture explicit at boot (live, not simulated).
+        logger.warning(
+            "OS control is LIVE: click/type execute automatically (trusted); "
+            "run_command requires console y/N approval. Web agent autonomy is ON "
+            "(allow_destructive=True, SSRF-filtered + timed out)."
+        )
         await app.orchestrator.start()
 
         # -- 5. Capture→STT→brain→TTS loop ------------------------------------
