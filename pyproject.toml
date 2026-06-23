@@ -77,6 +77,9 @@ dev = [
   "ruff==0.15.18",
 ]
 
+[project.scripts]
+friday = "core.app:main"
+
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
