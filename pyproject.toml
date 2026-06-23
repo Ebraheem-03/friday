@@ -43,6 +43,11 @@ voice = [
   # The whl URL matches the direct_url.json recorded by pip on the dev host.
   "spacy==3.8.14",
   "en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl#sha256=1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85",
+  # faster-whisper: CPU-only Whisper STT via CTranslate2 (no CUDA/nvidia packages).
+  # ctranslate2 (its engine) ships CPU-only wheels on PyPI — zero nvidia deps confirmed.
+  # Model weights download once from HuggingFace on first use (~150 MB for base.en).
+  # verified: https://pypi.org/pypi/faster-whisper/1.2.1/json (2026-06-23)
+  "faster-whisper==1.2.1",
 ]
 # --- halo / Step 8: HUD telemetry WebSocket ---
 #   websockets -> https://pypi.org/pypi/websockets/json

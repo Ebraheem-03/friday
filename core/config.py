@@ -131,6 +131,10 @@ class Settings:
         Audio sample rate in Hz. Default: 24000 (matches Kokoro TTS output).
     tts_voice : str
         Kokoro TTS voice identifier. Default: "af_heart".
+    stt_model : str
+        faster-whisper model size for speech-to-text. Default: "base.en".
+        Override with STT_MODEL env var (e.g. "small", "medium.en").
+        "base.en" gives good latency/accuracy on CPU for English speech.
     telemetry_ws_port : int
         WebSocket port for the HUD telemetry server. Default: 8765. Range: 1–65535.
     log_level : str
@@ -141,6 +145,7 @@ class Settings:
     gemini_model: str
     sample_rate: int
     tts_voice: str
+    stt_model: str
     telemetry_ws_port: int
     log_level: str
 
@@ -181,6 +186,7 @@ class Settings:
         gemini_model = _opt_str(env, "GEMINI_MODEL", "gemini-2.5-flash")
         sample_rate = _opt_int(env, "SAMPLE_RATE", 24000)
         tts_voice = _opt_str(env, "TTS_VOICE", "af_heart")
+        stt_model = _opt_str(env, "STT_MODEL", "base.en")
         telemetry_ws_port = _opt_int(env, "TELEMETRY_WS_PORT", 8765)
         log_level = _opt_str(env, "LOG_LEVEL", "INFO")
 
@@ -197,6 +203,7 @@ class Settings:
             gemini_model=gemini_model,
             sample_rate=sample_rate,
             tts_voice=tts_voice,
+            stt_model=stt_model,
             telemetry_ws_port=telemetry_ws_port,
             log_level=log_level,
         )
@@ -210,6 +217,7 @@ class Settings:
             f"gemini_model={self.gemini_model!r}, "
             f"sample_rate={self.sample_rate}, "
             f"tts_voice={self.tts_voice!r}, "
+            f"stt_model={self.stt_model!r}, "
             f"telemetry_ws_port={self.telemetry_ws_port}, "
             f"log_level={self.log_level!r})"
         )

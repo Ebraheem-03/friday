@@ -35,6 +35,7 @@ def _fake_settings(model: str = "test-model") -> Settings:
         gemini_model=model,
         sample_rate=24000,
         tts_voice="af_heart",
+        stt_model="base.en",
         telemetry_ws_port=8765,
         log_level="DEBUG",
     )
