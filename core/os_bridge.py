@@ -23,17 +23,26 @@ SAFE (no confirm/dry-run required — read-only or non-destructive launch):
   - read_file       Read a local file (size-capped; no sensitive-path traversal).
   - find_element    Find a UI element by role/name via AT-SPI (read-only).
   - open_app        Launch a desktop application (additive; does not destroy state).
+
+GATED-UNLESS-TRUSTED (gated by confirm_or_dry_run when trusted=False; bypass when trusted=True):
   - click           Synthetic click on a UI element or coordinate.
   - type            Synthetic keyboard text input.
 
-DESTRUCTIVE (always gated by confirm_or_dry_run):
+  Rationale: a prompt-injected cloud brain could synthesise keystrokes into a focused
+  terminal, turning click/type into an arbitrary command execution path. By default
+  (trusted=False) these actions are gated identically to run_command. When the user
+  explicitly opts into trusted=True (hands-free/unattended mode), click and type bypass
+  the gate so they can execute without per-action confirmation.
+
+ALWAYS GATED (even in trusted mode):
   - run_command     Execute an arbitrary subprocess (can change any system state).
 
-Note: `click` and `type` are not gated because they target a specific UI element or
-coordinate and cannot irreversibly destroy data on their own (the application they
-target would need to handle that separately). `open_app` only launches, never kills.
-`run_command` is the sole fully destructive action in the current allowlist; future
-additions (kill_process, delete_file, send_email) must also be gated.
+  Asymmetry: run_command is always gated even when trusted=True. Running arbitrary
+  shell commands is categorically higher-risk than synthesising UI input: a single
+  run_command can delete the filesystem, exfiltrate data, or install malware with no
+  UI-level confirmation. trusted=True relaxes the interactive gate for UI actions;
+  it does NOT relax it for unrestricted command execution. Future additions
+  (kill_process, delete_file, send_email) must also be always gated.
 """
 
 from __future__ import annotations
@@ -250,11 +259,71 @@ def _default_confirm(description: str) -> bool:
     """Default confirm callback: always deny (safe / dry-run default posture).
 
     In production, replace with a callback that prompts the user.
+
+    Security note (M-2): only the action name/verb is logged, NOT the full
+    description (which may include full argv or parameter values that could
+    contain secrets passed as CLI arguments).
     """
+    # Extract just the action name — the first word of the description — to
+    # avoid logging full argv or parameter values that may contain secrets.
+    action_name = description.split()[0] if description.split() else "(unknown)"
     logger.warning(
         "Destructive action blocked by default deny confirm callback: %s",
-        description,
+        action_name,
     )
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Sensitive-path blocklist helpers (read_file — L-1)
+# ---------------------------------------------------------------------------
+
+def _is_sensitive_path(path: Path) -> bool:
+    """Return True if *path* (already resolved) matches any blocked prefix/pattern.
+
+    This is a defence-in-depth belt-and-suspenders check — OS permissions are the
+    real guard.  Matching is done after Path.resolve() so symlinks and '..' segments
+    cannot bypass the check.
+
+    Blocked categories:
+    - /etc/shadow, /etc/passwd        (system credential files)
+    - /proc/, /sys/                   (kernel virtual filesystems)
+    - ~/.ssh/                         (SSH private keys / known_hosts)
+    - /etc/ssl/private/               (TLS private keys)
+    - /root/                          (root home directory)
+    - */.aws/credentials              (AWS access keys)
+    - */.config/gcloud/               (Google Cloud credentials)
+    """
+    path_str = str(path)
+
+    # Fixed prefix / exact matches.
+    fixed_prefixes = (
+        "/etc/shadow",
+        "/etc/passwd",
+        "/proc/",
+        "/sys/",
+        "/etc/ssl/private/",
+        "/root/",
+    )
+    for prefix in fixed_prefixes:
+        if path_str == prefix.rstrip("/") or path_str.startswith(prefix):
+            return True
+
+    # Home-relative: ~/.ssh (expand to real home).
+    home = Path.home()
+    ssh_dir = home / ".ssh"
+    if path_str == str(ssh_dir) or path_str.startswith(str(ssh_dir) + "/"):
+        return True
+
+    # Pattern-based: */.aws/credentials and */.config/gcloud/ anywhere in tree.
+    # We check the path components to handle any home directory layout.
+    parts = path.parts
+    for i, part in enumerate(parts):
+        if part == ".aws" and i + 1 < len(parts) and parts[i + 1] == "credentials":
+            return True
+        if part == ".config" and i + 1 < len(parts) and parts[i + 1] == "gcloud":
+            return True
+
     return False
 
 
@@ -275,21 +344,36 @@ class OsBridge:
         A sync callable(description: str) -> bool called for destructive actions
         when dry_run=False. Return True to allow execution, False to abort.
         Defaults to a deny-all callback that logs a warning.
+    trusted:
+        When False (default), click and type are gated through confirm_or_dry_run()
+        identically to run_command — in dry_run mode they return '[dry-run] would ...'
+        without calling the input tool; in live mode they require confirm_callback to
+        allow them. This closes the prompt-injection risk where a cloud brain could
+        synthesise keystrokes into a focused terminal.
+
+        When True, click and type execute WITHOUT the gate (for hands-free/unattended
+        use the user has explicitly opted into). run_command is ALWAYS gated regardless
+        of this flag — running arbitrary commands is a categorically higher-risk action
+        than synthesising UI input and is never relaxed. See module docstring for the
+        full asymmetry rationale.
 
     Security notes
     --------------
-    - Every destructive action (run_command) passes through confirm_or_dry_run().
+    - run_command always passes through confirm_or_dry_run(), even when trusted=True.
+    - click and type pass through confirm_or_dry_run() when trusted=False (default).
     - run_command passes argv lists directly to subprocess.run — no shell=True,
       no string interpolation of user input. If the model sends a string command
       it is rejected with an error message; the caller must pass a list.
     - read_file caps output at _READ_FILE_MAX_BYTES and never logs file content.
+    - read_file refuses a blocklist of sensitive paths (SSH keys, cloud creds, etc.).
     - AT-SPI imports are lazy and fail gracefully.
+    - Logging never includes full argv/params to avoid leaking secrets in CLI args.
 
     Usage
     -----
     Inject at Brain construction time::
 
-        bridge = OsBridge(dry_run=False, confirm_callback=my_prompt)
+        bridge = OsBridge(dry_run=False, confirm_callback=my_prompt, trusted=False)
         brain = Brain(settings, os_tool=bridge)
 
     # TODO(atlas): inject OsBridge at app boot
@@ -300,9 +384,11 @@ class OsBridge:
         *,
         dry_run: bool = True,
         confirm_callback: ConfirmCallback | None = None,
+        trusted: bool = False,
     ) -> None:
         self._dry_run = dry_run
         self._confirm_callback: ConfirmCallback = confirm_callback or _default_confirm
+        self._trusted = trusted
 
         # Build the action allowlist: maps action name -> handler coroutine.
         self._dispatch: dict[str, Callable[..., Any]] = {
@@ -315,8 +401,9 @@ class OsBridge:
         }
 
         logger.info(
-            "OsBridge initialised (dry_run=%s, display_server=%s)",
+            "OsBridge initialised (dry_run=%s, trusted=%s, display_server=%s)",
             self._dry_run,
+            self._trusted,
             detect_display_server().value,
         )
 
@@ -392,18 +479,18 @@ class OsBridge:
 
         path = Path(raw_path).expanduser().resolve()
 
-        # Basic sensitive-path hint (non-exhaustive; belt-and-suspenders).
-        sensitive_prefixes = ("/etc/shadow", "/etc/passwd", "/proc/", "/sys/")
-        for prefix in sensitive_prefixes:
-            if str(path).startswith(prefix):
-                logger.warning(
-                    "read_file: refusing to read potentially sensitive path (logged path only): %s",
-                    path,
-                )
-                return (
-                    f"Error: read_file refuses to read potentially sensitive path "
-                    f"'{path}'. Request a different path."
-                )
+        # Sensitive-path blocklist (L-1 hardening — belt-and-suspenders; OS
+        # permissions are the real guard).  Always checked after resolve() so
+        # symlink / '..' tricks cannot bypass the check.
+        if _is_sensitive_path(path):
+            logger.warning(
+                "read_file: refusing to read potentially sensitive path (logged path only): %s",
+                path,
+            )
+            return (
+                f"Error: read_file refuses to read potentially sensitive path "
+                f"'{path}'. Request a different path."
+            )
 
         if not path.exists():
             return f"Error: path does not exist: {path}"
@@ -514,7 +601,10 @@ class OsBridge:
     def _act_click(self, params: dict[str, Any]) -> str:
         """Perform a synthetic mouse click.
 
-        Safe action: clicks a specific target; does not irreversibly destroy data.
+        Gating: when trusted=False (default), this action is gated by
+        confirm_or_dry_run() — in dry_run mode it returns '[dry-run] would ...'
+        without calling the input tool; in live mode it requires confirm_callback
+        to allow it. When trusted=True it executes without the gate.
 
         Targeting priority:
         1. AT-SPI semantic (role + name) — preferred on Wayland/GNOME.
@@ -563,6 +653,13 @@ class OsBridge:
             click_x = int(x)
             click_y = int(y)
 
+        # Gate: apply confirm/dry-run when not in trusted mode.
+        if not self._trusted:
+            description = f"click at ({click_x}, {click_y}) button={button}"
+            blocked = self._confirm_or_dry_run(description)
+            if blocked is not None:
+                return blocked
+
         server = detect_display_server()
         tool = _choose_input_tool()
         if tool is None:
@@ -584,7 +681,10 @@ class OsBridge:
     def _act_type(self, params: dict[str, Any]) -> str:
         """Type text into the focused UI element using the input tool.
 
-        Safe action: sends keystrokes; does not irreversibly destroy data on its own.
+        Gating: when trusted=False (default), this action is gated by
+        confirm_or_dry_run() — in dry_run mode it returns '[dry-run] would ...'
+        without calling the input tool; in live mode it requires confirm_callback
+        to allow it. When trusted=True it executes without the gate.
 
         params keys:
           text (str, required): Text to type.
@@ -594,6 +694,15 @@ class OsBridge:
             text = str(text)
         if not text:
             return "Error: type requires non-empty 'text' parameter"
+
+        # Gate: apply confirm/dry-run when not in trusted mode.
+        # The description intentionally omits the text content to avoid logging
+        # sensitive keystrokes (passwords, secrets the model may be asked to type).
+        if not self._trusted:
+            description = f"type {len(text)} characters via input tool"
+            blocked = self._confirm_or_dry_run(description)
+            if blocked is not None:
+                return blocked
 
         server = detect_display_server()
         tool = _choose_input_tool()
@@ -616,20 +725,25 @@ class OsBridge:
         return f"Error: type failed: {msg}"
 
     # ------------------------------------------------------------------
-    # DESTRUCTIVE actions (gated by confirm_or_dry_run)
+    # DESTRUCTIVE actions (always gated by confirm_or_dry_run)
     # ------------------------------------------------------------------
 
     def _act_run_command(self, params: dict[str, Any]) -> str:
         """Execute an arbitrary subprocess command.
 
-        DESTRUCTIVE: can alter any system state. Gated by confirm_or_dry_run().
+        ALWAYS DESTRUCTIVE: gated by confirm_or_dry_run() even when trusted=True.
+
+        Rationale for always-gating: run_command can alter any system state —
+        delete the filesystem, exfiltrate data, install malware — with a single
+        invocation. Unlike click/type (which target a specific UI interaction),
+        run_command provides unrestricted shell-level access. trusted=True relaxes
+        the gate for UI input actions; it does NOT relax it here. See module docstring.
 
         Security:
         - argv must be a list of strings — no shell=True, no shell string interpolation.
         - If the model supplies a bare string (not a list), the action is rejected.
           This prevents prompt-injection from smuggling shell metacharacters.
-        - Command and its arguments are logged at DEBUG level ONLY as the first
-          element (the binary name), never the full argv, to avoid leaking arguments
+        - Only the binary name is logged (never full argv) to avoid leaking arguments
           that may contain secrets.
 
         params keys:
@@ -655,15 +769,17 @@ class OsBridge:
 
         timeout_secs = int(params.get("timeout", 30))
 
-        # Build the human-readable description for the confirm gate.
-        description = f"run_command argv={argv!r} timeout={timeout_secs}s"
+        # Build a description that includes only the binary name, NOT the full argv,
+        # to avoid leaking arguments that may contain secrets (M-2 hardening).
+        binary = argv[0]
+        description = f"run_command binary={binary!r} timeout={timeout_secs}s"
 
+        # Always gated — even in trusted mode. See docstring rationale.
         blocked = self._confirm_or_dry_run(description)
         if blocked is not None:
             return blocked
 
         # Confirmed — proceed.
-        binary = argv[0]
         binary_path = shutil.which(binary)
         if binary_path is None:
             return f"Error: command not found on PATH: '{binary}'"
