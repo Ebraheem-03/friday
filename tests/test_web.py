@@ -50,9 +50,14 @@ def _fake_settings(model: str = "gemini-test") -> Settings:
         gemini_model=model,
         sample_rate=24000,
         tts_voice="af_heart",
+        tts_engine="kokoro",
+        tts_gemini_voice="Kore",
+        tts_gemini_model="gemini-2.5-flash-preview-tts",
         stt_model="base.en",
         telemetry_ws_port=8765,
         log_level="DEBUG",
+        wake_word="friday",
+        wake_word_enabled=True,
     )
 
 

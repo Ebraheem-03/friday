@@ -80,6 +80,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import subprocess
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -120,6 +121,42 @@ class App:
     brain: Brain
     orchestrator: Orchestrator
     settings: Settings
+
+
+# ---------------------------------------------------------------------------
+# Wake-word gate
+# ---------------------------------------------------------------------------
+
+
+def _extract_command(text: str, wake_word: str, enabled: bool) -> str | None:
+    """Return the command after the wake word, or None if not addressed.
+
+    Always-on activation: FRIDAY only acts on an utterance that contains the
+    wake word (matched case-insensitively against the Whisper transcript).
+
+    Returns
+    -------
+    None
+        The wake word is absent — the utterance is ambient speech; ignore it.
+    str
+        The command text following the wake word (possibly empty if the user
+        said only the wake word). Leading "hey", punctuation and whitespace are
+        stripped.
+
+    When *enabled* is False, the full transcript is always returned (FRIDAY
+    responds to every utterance — quiet-room / push-to-talk mode).
+    """
+    if not enabled:
+        return text.strip()
+
+    # Find the wake word as a whole word, case-insensitive.
+    pattern = re.compile(rf"\b{re.escape(wake_word)}\b", re.IGNORECASE)
+    match = pattern.search(text)
+    if match is None:
+        return None
+    # Everything after the wake word is the command; strip leading punctuation.
+    remainder = text[match.end():]
+    return remainder.lstrip(" ,.:;!?-\t").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -418,9 +455,15 @@ async def run(app: App, settings: Settings) -> None:
     """
     # Lazy-import voice modules here so build_app/core/app.py imports clean
     # in CI without the [voice] extra installed.
-    from voice import tts_kokoro, stt
+    from voice import stt
     from voice.stream import speak_stream
     from voice.capture import capture_loop
+
+    # Active TTS engine + the voice id that matches it.
+    tts_engine = settings.tts_engine
+    tts_voice = (
+        settings.tts_gemini_voice if tts_engine == "gemini" else settings.tts_voice
+    )
 
     hud_proc: subprocess.Popen[bytes] | None = None
 
@@ -430,8 +473,18 @@ async def run(app: App, settings: Settings) -> None:
 
     try:
         # -- 1. Preload models -------------------------------------------------
-        logger.info("Preloading TTS and STT models (pays cold-start cost) ...")
-        await tts_kokoro.preload(settings.tts_voice)
+        logger.info(
+            "Preloading TTS (engine=%s) and STT models (pays cold-start cost) ...",
+            tts_engine,
+        )
+        if tts_engine == "gemini":
+            from voice import tts_gemini
+
+            await tts_gemini.preload(settings.gemini_api_key)
+        else:
+            from voice import tts_kokoro
+
+            await tts_kokoro.preload(tts_voice)
         await stt.preload(settings.stt_model)
         logger.info("Model preload complete.")
 
@@ -455,6 +508,14 @@ async def run(app: App, settings: Settings) -> None:
         await app.orchestrator.start()
 
         # -- 5. Capture→STT→brain→TTS loop ------------------------------------
+        if settings.wake_word_enabled:
+            logger.info(
+                "Wake word ACTIVE: say %r before a command (always-on). "
+                "Set WAKE_WORD_ENABLED=0 to respond to every utterance.",
+                settings.wake_word,
+            )
+        else:
+            logger.info("Wake word DISABLED: responding to every utterance.")
         logger.info("FRIDAY ready. Listening ...")
 
         try:
@@ -477,20 +538,34 @@ async def run(app: App, settings: Settings) -> None:
                 if not text.strip():
                     continue  # silence or noise — skip
 
+                # --- Wake-word gate -----------------------------------------
+                # In always-on mode, only act when addressed by the wake word.
+                command = _extract_command(
+                    text, settings.wake_word, settings.wake_word_enabled
+                )
+                if command is None:
+                    logger.info("Ignored (no wake word %r): %r", settings.wake_word, text[:60])
+                    continue
+                if not command.strip():
+                    logger.info("Wake word only, no command — ignoring.")
+                    continue
+
                 # --- Brain: wire per-turn text queue ------------------------
                 # Create a fresh queue + callbacks for this turn.
                 text_q = _make_turn_bridge(app.orchestrator)
 
                 # Enqueue user text to the orchestrator (brain worker picks it up).
-                await app.orchestrator.send(text)
+                await app.orchestrator.send(command)
 
                 # --- TTS: speak the brain's response -----------------------
                 # speak_stream consumes _queue_to_iter(text_q) until the None
                 # sentinel (which _on_state puts in when SPEAKING→IDLE fires).
                 await speak_stream(
                     _queue_to_iter(text_q),
-                    voice=settings.tts_voice,
+                    voice=tts_voice,
                     sample_rate=settings.sample_rate,
+                    engine=tts_engine,
+                    model=settings.tts_gemini_model,
                     tts_active=tts_active,
                     barge_in_event=barge_in_event,
                 )

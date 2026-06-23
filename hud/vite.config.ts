@@ -18,6 +18,10 @@ import path from "path";
 export default defineConfig({
   plugins: [react()],
   root: ".",
+  // Relative asset paths so the built index.html loads under the file://
+  // protocol inside Electron (absolute "/assets/..." resolves to the
+  // filesystem root and fails to load). Required for win.loadFile().
+  base: "./",
   build: {
     outDir: "dist",
     emptyOutDir: true,

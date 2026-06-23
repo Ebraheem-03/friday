@@ -3,13 +3,14 @@
   "version": "0.1.0",
   "description": "FRIDAY Iron-Man style telemetry HUD — Electron + React + Three.js",
   "private": true,
-  "main": "dist-electron/main.js",
+  "main": "dist-electron/main/main.js",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -p tsconfig.node.json --noEmit && vite build",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "build": "tsc -p tsconfig.node.json --noEmit && npm run build:electron && vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "start": "electron ."
+    "start": "npm run build:electron && electron ."
   },
   "dependencies": {
     "react": "19.2.7",

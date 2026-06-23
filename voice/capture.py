@@ -206,6 +206,21 @@ async def capture_loop(
     loop = asyncio.get_running_loop()
     vad = _VADStateMachine(threshold=rms_threshold)
 
+    def _enqueue(frame: np.ndarray) -> None:
+        """Runs on the event loop; drop the frame if the queue is full.
+
+        The drop MUST happen here (where put_nowait actually executes), not
+        around call_soon_threadsafe — that call only schedules and never raises,
+        so a QueueFull would otherwise escape to asyncio's default handler and
+        flood the logs.  Frames pile up while the consumer is paused mid-reply
+        (a long TTS turn); dropping them is correct — we don't transcribe our
+        own playback.
+        """
+        try:
+            audio_queue.put_nowait(frame)
+        except asyncio.QueueFull:
+            logger.debug("VAD queue full — dropping frame")
+
     def _callback(
         indata: np.ndarray,
         frames: int,
@@ -217,10 +232,7 @@ async def capture_loop(
             logger.debug("sounddevice status: %s", status)
         # indata shape: (frames, 1) for mono channels=1
         mono = indata[:, 0].copy()
-        try:
-            loop.call_soon_threadsafe(audio_queue.put_nowait, mono)
-        except asyncio.QueueFull:
-            logger.debug("VAD queue full — dropping frame")
+        loop.call_soon_threadsafe(_enqueue, mono)
 
     stream = sd.InputStream(
         samplerate=sample_rate,

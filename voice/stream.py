@@ -63,15 +63,45 @@ sounddevice API used (sounddevice 0.5.5)
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import re
 from collections.abc import AsyncIterator
+from typing import Protocol
 
 import numpy as np
 
 from voice.tts_kokoro import synth as tts_synth
 
 logger = logging.getLogger(__name__)
+
+
+class TtsSynth(Protocol):
+    """Structural type for a TTS synth function (Kokoro or Gemini).
+
+    Both ``voice.tts_kokoro.synth`` and ``voice.tts_gemini.synth`` satisfy this:
+    an async generator yielding raw 16-bit LE PCM at ``sample_rate``.
+    """
+
+    def __call__(
+        self, text: str, *, voice: str, sample_rate: int
+    ) -> AsyncIterator[bytes]: ...
+
+
+def _resolve_synth(engine: str, model: str | None = None) -> "TtsSynth":
+    """Return the synth function for *engine* ('kokoro' or 'gemini').
+
+    For the Gemini engine, *model* (if given) is bound so the operator's
+    TTS_GEMINI_MODEL setting actually takes effect; the resulting partial still
+    matches the ``TtsSynth`` signature ``(text, *, voice, sample_rate)``.
+    """
+    if engine == "gemini":
+        from voice.tts_gemini import synth as gemini_synth
+
+        if model:
+            return functools.partial(gemini_synth, model=model)
+        return gemini_synth
+    return tts_synth
 
 # ---------------------------------------------------------------------------
 # Tuning constants — documented above.
@@ -176,18 +206,39 @@ async def _tts_worker(
     pcm_queue: "asyncio.Queue[bytes | None]",
     voice: str,
     sample_rate: int,
+    synth_fn: "TtsSynth" = tts_synth,
 ) -> None:
-    """Consume sentence chunks, synthesise, push PCM onto *pcm_queue*."""
+    """Consume text chunks, synthesise with *synth_fn*, push PCM onto *pcm_queue*."""
     while True:
         chunk = await chunk_queue.get()
         if chunk is None:
             break  # text stream exhausted
         logger.debug("TTS synthesising %d chars", len(chunk))
-        async for pcm_bytes in tts_synth(chunk, voice=voice, sample_rate=sample_rate):
+        async for pcm_bytes in synth_fn(chunk, voice=voice, sample_rate=sample_rate):
             await pcm_queue.put(pcm_bytes)
 
     # Sentinel: no more audio.
     await pcm_queue.put(None)
+
+
+async def _collect_whole(
+    text_stream: "AsyncIterator[str]",
+    chunk_queue: "asyncio.Queue[str | None]",
+) -> None:
+    """Whole-utterance producer: accumulate the full reply, emit it as ONE chunk.
+
+    Used for cloud engines (e.g. Gemini) whose per-request latency floor makes
+    sentence-chunking counter-productive — one call gives lower total latency and
+    smoother, more natural prosody than many small calls.
+    """
+    parts: list[str] = []
+    async for delta in text_stream:
+        if delta:
+            parts.append(delta)
+    full = "".join(parts).strip()
+    if full:
+        await chunk_queue.put(full)
+    await chunk_queue.put(None)
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +317,8 @@ async def speak_stream(
     *,
     voice: str = "af_heart",
     sample_rate: int = 24_000,
+    engine: str = "kokoro",
+    model: str | None = None,
     tts_active: asyncio.Event | None = None,
     barge_in_event: asyncio.Event | None = None,
 ) -> None:
@@ -316,12 +369,19 @@ async def speak_stream(
     # Clear barge-in before starting a new turn.
     barge_in_event.clear()
 
-    chunker_task = asyncio.create_task(
-        _chunk_stream(text_stream, chunk_queue),
-        name="voice.chunker",
-    )
+    synth_fn = _resolve_synth(engine, model)
+
+    # Cloud engines (gemini) have a per-request latency floor, so synthesise the
+    # whole reply in one call; local Kokoro streams sentence chunks for low
+    # first-audio latency.
+    if engine == "gemini":
+        producer = _collect_whole(text_stream, chunk_queue)
+    else:
+        producer = _chunk_stream(text_stream, chunk_queue)
+
+    chunker_task = asyncio.create_task(producer, name="voice.chunker")
     tts_task = asyncio.create_task(
-        _tts_worker(chunk_queue, pcm_queue, voice, sample_rate),
+        _tts_worker(chunk_queue, pcm_queue, voice, sample_rate, synth_fn),
         name="voice.tts",
     )
     player_task = asyncio.create_task(

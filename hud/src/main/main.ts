@@ -14,10 +14,9 @@
 
 import { app, BrowserWindow, session } from "electron";
 import path from "path";
-import { fileURLToPath } from "url";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// Compiled to CommonJS (see tsconfig.electron.json), so __dirname is provided
+// by the Node module wrapper natively — no import.meta / fileURLToPath shim.
 
 // The renderer build output directory (after `vite build`)
 const RENDERER_DIST = path.join(__dirname, "../../dist");
