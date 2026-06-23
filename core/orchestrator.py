@@ -228,6 +228,10 @@ class Orchestrator:
         """Register a state-change observer (forwarded to StateMachine)."""
         self._sm.subscribe(observer)
 
+    def unsubscribe_state(self, observer: Callable[[State, State], None]) -> bool:
+        """Remove a previously registered state observer. Returns True if found."""
+        return self._sm.unsubscribe(observer)
+
     # ------------------------------------------------------------------
     # Background workers
     # ------------------------------------------------------------------
