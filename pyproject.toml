@@ -3,21 +3,98 @@ name = "friday"
 version = "0.0.1"
 description = "Local voice assistant (Gemini brain, Linux)."
 requires-python = ">=3.11"
-# Pin exact versions during Step 1 (sentinel verifies provenance).
+
+# ---------------------------------------------------------------------------
+# Dependency pins — ALL versions resolved from PyPI JSON API on 2026-06-22 and
+# confirmed stable (no pre-release suffix). Sentinel: verify each package name
+# against its canonical PyPI URL before accepting a PR that changes any pin.
+#
+# Layout: only the Gemini brain (google-genai, pure-Python) is an always-on
+# runtime dep. The heavy native/ML stacks live in per-module EXTRAS so that:
+#   - CI / unit tests install just `.[dev]` (fast, no native or CUDA build);
+#   - each specialist installs only their module's extra in-phase.
+#
+#   google-genai  -> https://pypi.org/pypi/google-genai/json
+#   sounddevice   -> https://pypi.org/pypi/sounddevice/json
+#   kokoro        -> https://pypi.org/pypi/kokoro/json
+#   browser-use   -> https://pypi.org/pypi/browser-use/json
+#   scrapling     -> https://pypi.org/pypi/scrapling/json
+#   PyGObject     -> https://pypi.org/pypi/PyGObject/json
+# ---------------------------------------------------------------------------
 dependencies = [
-  # "google-genai==x.y.z",
-  # "sounddevice==x.y.z",
-  # "kokoro==x.y.z",
-  # "browser-use==x.y.z",
-  # "scrapling==x.y.z",
-  # "PyGObject==x.y.z",   # AT-SPI
+  "google-genai==2.9.0",      # Gemini brain (streaming + Live) — google.genai import
 ]
 
 [project.optional-dependencies]
-dev = [
-  # "pytest==x.y.z",
-  # "ruff==x.y.z",
+# --- echo / Step 4: voice I/O ---
+# NOTE: kokoro pulls torch + transformers. torch MUST be installed CPU-ONLY
+# (no CUDA). Install this extra with the PyTorch CPU index, e.g.:
+#   pip install '.[voice]' --extra-index-url https://download.pytorch.org/whl/cpu
+# See docs/SETUP.md and constraints/cpu.txt. (Project constraint — Ebraheem.)
+voice = [
+  "numpy==2.4.4",             # VAD / PCM math (direct import in voice/*)
+  "sounddevice==0.5.5",       # Audio capture/playback
+  "kokoro==0.9.4",            # Kokoro-82M local TTS (pulls torch — CPU only)
+  # spaCy + English G2P model — misaki/en.py calls spacy.load('en_core_web_sm')
+  # and will runtime-pip-install the model if absent (ADR-0008 violation).
+  # Pinning here so `pip install '.[voice]'` fetches both up-front.
+  # spacy 3.8.14 is the version installed alongside misaki 0.9.4 / kokoro 0.9.4;
+  # en_core_web_sm 3.8.0 is the exact model that spacy 3.8.x downloads by default.
+  # The whl URL matches the direct_url.json recorded by pip on the dev host.
+  "spacy==3.8.14",
+  "en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl#sha256=1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85",
+  # faster-whisper: CPU-only Whisper STT via CTranslate2 (no CUDA/nvidia packages).
+  # ctranslate2 (its engine) ships CPU-only wheels on PyPI — zero nvidia deps confirmed.
+  # Model weights download once from HuggingFace on first use (~150 MB for base.en).
+  # verified: https://pypi.org/pypi/faster-whisper/1.2.1/json (2026-06-23)
+  "faster-whisper==1.2.1",
 ]
+# --- halo / Step 8: HUD telemetry WebSocket ---
+#   websockets -> https://pypi.org/pypi/websockets/json
+#   psutil     -> https://pypi.org/pypi/psutil/json
+hud = [
+  "websockets==16.0",          # Async WebSocket server (HUD telemetry broadcast)
+  "psutil==7.2.2",             # CPU/RAM system metrics for telemetry frames
+]
+# --- scout / Step 7: web automation ---
+web = [
+  "browser-use==0.13.1",      # Browser automation (runtime web agent)
+  "scrapling==0.4.9",         # Fast HTML scraping
+]
+# --- vector / Step 6: Linux OS bridge ---
+# Needs system libs (libgirepository-2.0-dev, gobject-introspection) on the host.
+os = [
+  "PyGObject==3.56.3",        # AT-SPI / GObject bindings for Linux OS bridge
+]
+# --- dev / CI ---
+#   pytest         -> https://pypi.org/pypi/pytest/json
+#   pytest-asyncio -> https://pypi.org/pypi/pytest-asyncio/json
+#   ruff           -> https://pypi.org/pypi/ruff/json
+dev = [
+  "numpy==2.4.4",             # voice/* import numpy; needed to run mocked voice tests in CI
+  "pytest==9.1.1",
+  "pytest-asyncio==1.3.0",
+  "ruff==0.15.18",
+]
+
+[project.scripts]
+friday = "core.app:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# Explicit package list: the repo is a flat layout with several top-level
+# packages, so setuptools auto-discovery refuses to guess. `hud/` is an
+# Electron/JS app (not importable Python) and is intentionally excluded.
+[tool.setuptools]
+packages = ["core", "memory", "voice", "web"]
 
 [tool.ruff]
 line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+# Async tests use explicit @pytest.mark.asyncio markers (strict mode).
+asyncio_mode = "strict"
