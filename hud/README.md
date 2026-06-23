@@ -21,6 +21,25 @@ npm run build        # bundle the renderer
 npm start            # launch Electron window
 ```
 
+### Linux notes (one-time)
+
+1. **Electron binary missing?** If `npm start` fails with *"Electron failed to install
+   correctly"*, the platform binary was skipped at install time (e.g. CI sets
+   `ELECTRON_SKIP_BINARY_DOWNLOAD=1`). Fetch it without that flag:
+
+   ```sh
+   ( unset ELECTRON_SKIP_BINARY_DOWNLOAD; node node_modules/electron/install.js )
+   ```
+
+2. **`chrome-sandbox` SUID permission.** Electron's setuid sandbox helper must be
+   root-owned, mode 4755, or Electron aborts (it refuses to run unsandboxed). We keep
+   the renderer sandbox ON, so set the permission rather than passing `--no-sandbox`:
+
+   ```sh
+   sudo chown root:root node_modules/electron/dist/chrome-sandbox
+   sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
+   ```
+
 ## Development workflow
 
 ```sh

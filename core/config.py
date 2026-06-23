@@ -104,6 +104,19 @@ def _opt_int(env: dict[str, str], key: str, default: int) -> int:
         ) from None
 
 
+def _opt_bool(env: dict[str, str], key: str, default: bool) -> bool:
+    raw = env.get(key, "").strip().lower()
+    if not raw:
+        return default
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    raise ConfigError(
+        f"Environment variable '{key}' must be a boolean (1/0/true/false); got {raw!r}."
+    )
+
+
 def _validate_port(value: int, key: str) -> int:
     if not (1 <= value <= 65535):
         raise ConfigError(
@@ -131,6 +144,14 @@ class Settings:
         Audio sample rate in Hz. Default: 24000 (matches Kokoro TTS output).
     tts_voice : str
         Kokoro TTS voice identifier. Default: "af_heart".
+    tts_engine : str
+        TTS backend: "gemini" (near-human cloud, ~3-5 s/reply, default) or
+        "kokoro" (local, instant, robotic). Override with TTS_ENGINE.
+    tts_gemini_voice : str
+        Gemini prebuilt voice name when tts_engine="gemini". Default: "Kore"
+        (others: Puck, Charon, Aoede, Fenrir, Leda, ...). Override TTS_GEMINI_VOICE.
+    tts_gemini_model : str
+        Gemini TTS model id. Default: "gemini-2.5-flash-preview-tts".
     stt_model : str
         faster-whisper model size for speech-to-text. Default: "base.en".
         Override with STT_MODEL env var (e.g. "small", "medium.en").
@@ -139,15 +160,28 @@ class Settings:
         WebSocket port for the HUD telemetry server. Default: 8765. Range: 1–65535.
     log_level : str
         Python logging level name. Default: "INFO".
+    wake_word : str
+        Wake word that must prefix a command for FRIDAY to respond. Default:
+        "friday". Matching is case-insensitive on the Whisper transcript.
+        Override with WAKE_WORD.
+    wake_word_enabled : bool
+        When True (default), FRIDAY ignores any utterance that does not contain
+        the wake word — the always-on posture. Set WAKE_WORD_ENABLED=0 to make
+        it respond to every utterance (push-to-talk / quiet-room mode).
     """
 
     gemini_api_key: str
     gemini_model: str
     sample_rate: int
     tts_voice: str
+    tts_engine: str
+    tts_gemini_voice: str
+    tts_gemini_model: str
     stt_model: str
     telemetry_ws_port: int
     log_level: str
+    wake_word: str
+    wake_word_enabled: bool
 
     # ------------------------------------------------------------------
     # Factory
@@ -186,9 +220,14 @@ class Settings:
         gemini_model = _opt_str(env, "GEMINI_MODEL", "gemini-2.5-flash")
         sample_rate = _opt_int(env, "SAMPLE_RATE", 24000)
         tts_voice = _opt_str(env, "TTS_VOICE", "af_heart")
+        tts_engine = _opt_str(env, "TTS_ENGINE", "gemini").strip().lower()
+        tts_gemini_voice = _opt_str(env, "TTS_GEMINI_VOICE", "Kore")
+        tts_gemini_model = _opt_str(env, "TTS_GEMINI_MODEL", "gemini-2.5-flash-preview-tts")
         stt_model = _opt_str(env, "STT_MODEL", "base.en")
         telemetry_ws_port = _opt_int(env, "TELEMETRY_WS_PORT", 8765)
         log_level = _opt_str(env, "LOG_LEVEL", "INFO")
+        wake_word = _opt_str(env, "WAKE_WORD", "friday")
+        wake_word_enabled = _opt_bool(env, "WAKE_WORD_ENABLED", True)
 
         # --- Validation ---
         _validate_port(telemetry_ws_port, "TELEMETRY_WS_PORT")
@@ -197,15 +236,24 @@ class Settings:
             raise ConfigError(
                 f"Environment variable 'SAMPLE_RATE' must be a positive integer; got {sample_rate}."
             )
+        if tts_engine not in ("gemini", "kokoro"):
+            raise ConfigError(
+                f"Environment variable 'TTS_ENGINE' must be 'gemini' or 'kokoro'; got {tts_engine!r}."
+            )
 
         return cls(
             gemini_api_key=gemini_api_key,
             gemini_model=gemini_model,
             sample_rate=sample_rate,
             tts_voice=tts_voice,
+            tts_engine=tts_engine,
+            tts_gemini_voice=tts_gemini_voice,
+            tts_gemini_model=tts_gemini_model,
             stt_model=stt_model,
             telemetry_ws_port=telemetry_ws_port,
             log_level=log_level,
+            wake_word=wake_word,
+            wake_word_enabled=wake_word_enabled,
         )
 
     def __repr__(self) -> str:
@@ -217,8 +265,12 @@ class Settings:
             f"gemini_model={self.gemini_model!r}, "
             f"sample_rate={self.sample_rate}, "
             f"tts_voice={self.tts_voice!r}, "
+            f"tts_engine={self.tts_engine!r}, "
+            f"tts_gemini_voice={self.tts_gemini_voice!r}, "
             f"stt_model={self.stt_model!r}, "
             f"telemetry_ws_port={self.telemetry_ws_port}, "
+            f"wake_word={self.wake_word!r}, "
+            f"wake_word_enabled={self.wake_word_enabled}, "
             f"log_level={self.log_level!r})"
         )
 

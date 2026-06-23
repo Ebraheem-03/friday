@@ -29,6 +29,7 @@ import pytest
 
 from core.app import (
     App,
+    _extract_command,
     _make_turn_bridge,
     _queue_to_iter,
     _spawn_hud,
@@ -56,9 +57,14 @@ def _fake_settings(**overrides: object) -> Settings:
         gemini_model="gemini-2.5-flash",
         sample_rate=24_000,
         tts_voice="af_heart",
+        tts_engine="kokoro",
+        tts_gemini_voice="Kore",
+        tts_gemini_model="gemini-2.5-flash-preview-tts",
         stt_model="base.en",
         telemetry_ws_port=8765,
         log_level="INFO",
+        wake_word="friday",
+        wake_word_enabled=True,
     )
     defaults.update(overrides)
     return Settings(**defaults)  # type: ignore[arg-type]
@@ -490,3 +496,41 @@ async def _drain_queue(q: asyncio.Queue[str | None]) -> None:
     """Drain all items from *q* (async, for use with wait_for)."""
     while not q.empty():
         q.get_nowait()
+
+
+# ---------------------------------------------------------------------------
+# Wake-word gate
+# ---------------------------------------------------------------------------
+
+
+class TestExtractCommand:
+    """_extract_command: always-on wake-word gating."""
+
+    def test_wake_word_prefix_returns_command(self) -> None:
+        assert _extract_command("Friday, what's the weather?", "friday", True) == (
+            "what's the weather?"
+        )
+
+    def test_hey_wake_word(self) -> None:
+        assert _extract_command("Hey Friday open the browser", "friday", True) == (
+            "open the browser"
+        )
+
+    def test_case_insensitive(self) -> None:
+        assert _extract_command("FRIDAY status report", "friday", True) == "status report"
+
+    def test_no_wake_word_returns_none(self) -> None:
+        assert _extract_command("what time is it", "friday", True) is None
+
+    def test_wake_word_only_returns_empty(self) -> None:
+        assert _extract_command("Friday.", "friday", True) == ""
+
+    def test_substring_does_not_falsely_match(self) -> None:
+        # "fridays" should not match the whole word "friday"
+        assert _extract_command("I love fridays", "friday", True) is None
+
+    def test_disabled_returns_full_text(self) -> None:
+        assert _extract_command("what time is it", "friday", False) == "what time is it"
+
+    def test_wake_word_mid_sentence(self) -> None:
+        assert _extract_command("okay Friday play music", "friday", True) == "play music"

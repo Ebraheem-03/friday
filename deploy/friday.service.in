@@ -1,0 +1,24 @@
+[Unit]
+Description=FRIDAY — always-on voice assistant (Gemini brain, wake word, HUD)
+# Run inside the graphical user session so the HUD, ydotool and audio work.
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=__WORKDIR__
+ExecStart=__FRIDAY_BIN__
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+# Display + audio so the HUD (Electron), ydotool and sounddevice can reach the
+# session. XDG_RUNTIME_DIR (PulseAudio/PipeWire socket) is provided to user
+# services automatically. Adjust WAYLAND_DISPLAY/DISPLAY if yours differ.
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=DISPLAY=:0
+Environment=PYTHONUNBUFFERED=1
+# NOTE: secrets (GEMINI_API_KEY) are read from the repo .env by the app itself,
+# NOT placed here — keep them out of systemd unit files.
+
+[Install]
+WantedBy=graphical-session.target

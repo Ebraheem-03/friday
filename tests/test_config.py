@@ -312,3 +312,67 @@ class TestSettingsBehaviour:
         cfg = load_settings(dotenv_path=dotenv)
         assert isinstance(cfg, Settings)
         assert cfg.gemini_api_key == "wrapper-key"
+
+
+# ---------------------------------------------------------------------------
+# TTS engine + wake-word settings
+# ---------------------------------------------------------------------------
+
+
+class TestTtsAndWakeWordSettings:
+    def test_defaults(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setenv("GEMINI_API_KEY", "k")
+        for v in ("TTS_ENGINE", "TTS_GEMINI_VOICE", "WAKE_WORD", "WAKE_WORD_ENABLED"):
+            monkeypatch.delenv(v, raising=False)
+        cfg = Settings.from_env(dotenv_path=_make_env_file(tmp_path, ""))
+        assert cfg.tts_engine == "gemini"
+        assert cfg.tts_gemini_voice == "Kore"
+        assert cfg.wake_word == "friday"
+        assert cfg.wake_word_enabled is True
+
+    def test_tts_engine_normalised_and_validated(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("GEMINI_API_KEY", "k")
+        monkeypatch.setenv("TTS_ENGINE", "  Kokoro  ")
+        cfg = Settings.from_env(dotenv_path=_make_env_file(tmp_path, ""))
+        assert cfg.tts_engine == "kokoro"
+
+    def test_tts_engine_invalid_raises(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("GEMINI_API_KEY", "k")
+        monkeypatch.setenv("TTS_ENGINE", "espeak")
+        with pytest.raises(ConfigError):
+            Settings.from_env(dotenv_path=_make_env_file(tmp_path, ""))
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [("1", True), ("true", True), ("yes", True), ("on", True),
+         ("0", False), ("false", False), ("no", False), ("off", False),
+         ("TRUE", True), ("Off", False)],
+    )
+    def test_wake_word_enabled_bool_parsing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, raw: str, expected: bool
+    ) -> None:
+        monkeypatch.setenv("GEMINI_API_KEY", "k")
+        monkeypatch.setenv("WAKE_WORD_ENABLED", raw)
+        cfg = Settings.from_env(dotenv_path=_make_env_file(tmp_path, ""))
+        assert cfg.wake_word_enabled is expected
+
+    def test_wake_word_enabled_invalid_raises(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("GEMINI_API_KEY", "k")
+        monkeypatch.setenv("WAKE_WORD_ENABLED", "maybe")
+        with pytest.raises(ConfigError):
+            Settings.from_env(dotenv_path=_make_env_file(tmp_path, ""))
+
+    def test_repr_redacts_key_with_new_fields(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("GEMINI_API_KEY", "super-secret-value")
+        cfg = Settings.from_env(dotenv_path=_make_env_file(tmp_path, ""))
+        r = repr(cfg)
+        assert "super-secret-value" not in r
+        assert "wake_word=" in r and "tts_engine=" in r
